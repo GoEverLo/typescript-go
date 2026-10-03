@@ -22,7 +22,7 @@ Output::
 
 [[90mHH:MM:SS AM[0m] Found 1 error. Watching for file changes.
 
-//// [/home/src/tslibs/TS/Lib/lib.d.ts] *Lib*
+//// [/home/src/tslibs/TS/Lib/lib.es2025.full.d.ts] *Lib*
 /// <reference no-default-lib="true"/>
 interface Boolean {}
 interface Function {}
@@ -46,6 +46,7 @@ interface Symbol {
 }
 declare const console: { log(msg: any): void; };
 //// [/user/username/projects/myproject/index.js] *new* 
+"use strict";
 const fn = (a, b) => b;
 
 //// [/user/username/projects/myproject/tsconfig.tsbuildinfo] *new* 
@@ -65,9 +66,12 @@ const fn = (a, b) => b;
   "semanticErrors": true
 }
 
+Watch Registrations::
+Directory watches::
+  /user/username/projects/myproject (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /user/username/projects/myproject/index.ts
 Signatures::
 
@@ -103,8 +107,11 @@ Output::
   "size": 49
 }
 
+Watch Registrations::
+Directory watches::
+  /user/username/projects/myproject (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /user/username/projects/myproject/index.ts
 Signatures::

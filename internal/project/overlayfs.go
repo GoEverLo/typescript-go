@@ -6,9 +6,11 @@ import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/debug"
 	"github.com/microsoft/typescript-go/internal/ls/lsconv"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/sourcemap"
+	"github.com/microsoft/typescript-go/internal/spanmap"
 	"github.com/microsoft/typescript-go/internal/tspath"
 	"github.com/microsoft/typescript-go/internal/vfs"
 	"github.com/zeebo/xxh3"
@@ -70,7 +72,8 @@ func (f *fileBase) ECMALineInfo() *sourcemap.ECMALineInfo {
 
 type diskFile struct {
 	fileBase
-	needsReload bool
+	needsReload  bool
+	realpathPath tspath.Path
 }
 
 func newDiskFile(fileName string, content string) *diskFile {
@@ -78,7 +81,7 @@ func newDiskFile(fileName string, content string) *diskFile {
 		fileBase: fileBase{
 			fileName: fileName,
 			content:  content,
-			hash:     xxh3.Hash128([]byte(content)),
+			hash:     xxh3.HashString128(content),
 		},
 	}
 }
@@ -103,6 +106,7 @@ func (f *diskFile) Kind() core.ScriptKind {
 
 func (f *diskFile) Clone() *diskFile {
 	return &diskFile{
+		realpathPath: f.realpathPath,
 		fileBase: fileBase{
 			fileName: f.fileName,
 			content:  f.content,
@@ -125,7 +129,7 @@ func newOverlay(fileName string, content string, version int32, kind core.Script
 		fileBase: fileBase{
 			fileName: fileName,
 			content:  content,
-			hash:     xxh3.Hash128([]byte(content)),
+			hash:     xxh3.HashString128(content),
 		},
 		version: version,
 		kind:    kind,
@@ -140,21 +144,30 @@ func (o *Overlay) Text() string {
 	return o.content
 }
 
+func (o *Overlay) OriginalFileName() string { return o.FileName() }
+
+// SpanMap and OriginalText satisfy lsconv.Script. An overlay holds the editor's raw text (for a
+// content-mapped file, that is the original foreign text, not the transformed output), so it never
+// carries a span map and its original text is its own text.
+func (o *Overlay) SpanMap() *spanmap.SpanMap { return nil }
+
+func (o *Overlay) OriginalText() string { return o.content }
+
 // MatchesDiskText may return false negatives, but never false positives.
 func (o *Overlay) MatchesDiskText() bool {
 	return o.matchesDiskText
 }
 
 // !!! optimization: incorporate mtime
-func (o *Overlay) computeMatchesDiskText(fs vfs.FS) bool {
-	if isDynamicFileName(o.fileName) {
-		return false
+func (o *Overlay) computeMatchesDiskText(fs vfs.FS) (matchesDiskText bool, exists bool) {
+	if tspath.IsDynamicFileName(o.fileName) {
+		return false, false
 	}
 	diskContent, ok := fs.ReadFile(o.fileName)
 	if !ok {
-		return false
+		return false, false
 	}
-	return xxh3.Hash128([]byte(diskContent)) == o.hash
+	return xxh3.HashString128(diskContent) == o.hash, true
 }
 
 func (o *Overlay) IsOverlay() bool {
@@ -244,8 +257,10 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
 
 		switch change.Kind {
 		case FileChangeKindOpen:
+			if events.closeChange != nil {
+				events.closeChange = nil
+			}
 			events.openChange = &change
-			events.closeChange = nil
 			events.watchChanged = false
 			events.changes = nil
 			events.saved = false
@@ -296,32 +311,43 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
 		o := newOverlays[path]
 
 		if events.openChange != nil {
-			if result.Opened != "" {
+			if result.Opened != "" || result.Reopened != "" {
 				panic("can only process one file open event at a time")
 			}
-			result.Opened = uri
+			if o != nil && o.Content() != events.openChange.Content {
+				result.Changed.Add(uri)
+			} else if o == nil {
+				result.Opened = uri
+			} else {
+				result.Reopened = uri
+			}
+			scriptKind := lsconv.LanguageKindToScriptKind(events.openChange.LanguageKind)
+			if scriptKind == core.ScriptKindUnknown {
+				scriptKind = core.GetScriptKindFromFileName(uri.FileName())
+			}
 			newOverlays[path] = newOverlay(
 				uri.FileName(),
 				events.openChange.Content,
 				events.openChange.Version,
-				lsconv.LanguageKindToScriptKind(events.openChange.LanguageKind),
+				scriptKind,
 			)
 			continue
 		}
 
 		if events.closeChange != nil {
-			if result.Closed == nil {
-				result.Closed = make(map[lsproto.DocumentUri]xxh3.Uint128)
+			if o == nil {
+				panic("overlay not found for closed file: " + uri)
 			}
-			result.Closed[uri] = events.closeChange.Hash
+			result.Closed.Add(uri)
 			delete(newOverlays, path)
+			o = nil
 		}
 
 		if events.watchChanged {
 			if o == nil {
 				result.Changed.Add(uri)
 			} else if o != nil && !events.saved {
-				if matchesDiskText := o.computeMatchesDiskText(fs.fs); matchesDiskText != o.MatchesDiskText() {
+				if matchesDiskText, _ := o.computeMatchesDiskText(fs.fs); matchesDiskText != o.MatchesDiskText() {
 					o = newOverlay(o.FileName(), o.Content(), o.Version(), o.kind)
 					o.matchesDiskText = matchesDiskText
 					newOverlays[path] = o
@@ -340,7 +366,10 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
 				})
 				for _, textChange := range change.Changes {
 					if partialChange := textChange.Partial; partialChange != nil {
-						newContent := converters.FromLSPTextChange(o, partialChange).ApplyTo(o.content)
+						ranges := lsconv.FromLSPRange(converters, o, partialChange.Range, spanmap.FeatureAll)
+						debug.Assert(len(ranges) == 1, "expected exactly one range for partial change")
+						textChange := core.TextChange{TextRange: ranges[0].Span, NewText: partialChange.Text}
+						newContent := textChange.ApplyTo(o.content)
 						o = newOverlay(o.fileName, newContent, change.Version, o.kind)
 					} else if wholeChange := textChange.WholeDocument; wholeChange != nil {
 						o = newOverlay(o.fileName, wholeChange.Text, change.Version, o.kind)
@@ -348,7 +377,7 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
 				}
 				if len(change.Changes) > 0 {
 					o.version = change.Version
-					o.hash = xxh3.Hash128([]byte(o.content))
+					o.hash = xxh3.HashString128(o.content)
 					o.matchesDiskText = false
 					newOverlays[path] = o
 				}
@@ -356,12 +385,14 @@ func (fs *overlayFS) processChanges(changes []FileChange) (FileChangeSummary, ma
 		}
 
 		if events.saved {
-			if o == nil {
-				panic("overlay not found for saved file: " + uri)
+			if o != nil {
+				o = newOverlay(o.FileName(), o.Content(), o.Version(), o.kind)
+				o.matchesDiskText = true
+				newOverlays[path] = o
+			} else if !events.watchChanged {
+				// File was saved but never opened via didOpen; treat as a disk change.
+				result.Changed.Add(uri)
 			}
-			o = newOverlay(o.FileName(), o.Content(), o.Version(), o.kind)
-			o.matchesDiskText = true
-			newOverlays[path] = o
 		}
 
 		if events.created && o == nil {

@@ -1,6 +1,5 @@
 // === QuickInfo ===
 === /foo.ts ===
-// /// <reference no-default-lib="true"/>
 // /// <reference path='./bar.d.ts' />
 // import.meta;
 //   ^
@@ -9,17 +8,20 @@
 // | ----------------------------------------------------------------------
 // ^^^^^^^^^^^
 // | ----------------------------------------------------------------------
-// | ```tsx
-// | (property) ImportMetaExpression.meta: ImportMeta
+// | ```typescript
+// | interface ImportMeta
 // | ```
+// | The type of `import.meta`.
 // | 
+// | If you need to declare that a given property exists on `import.meta`,
+// | this type may be augmented via interface merging.
 // | ----------------------------------------------------------------------
 [
   {
     "marker": {
-      "Position": 77,
+      "Position": 38,
       "LSPosition": {
-        "line": 2,
+        "line": 1,
         "character": 2
       },
       "Name": "1",
@@ -29,9 +31,9 @@
   },
   {
     "marker": {
-      "Position": 84,
+      "Position": 45,
       "LSPosition": {
-        "line": 2,
+        "line": 1,
         "character": 9
       },
       "Name": "2",
@@ -40,15 +42,15 @@
     "item": {
       "contents": {
         "kind": "markdown",
-        "value": "```tsx\n(property) ImportMetaExpression.meta: ImportMeta\n```\n"
+        "value": "```typescript\ninterface ImportMeta\n```\nThe type of `import.meta`.\n\nIf you need to declare that a given property exists on `import.meta`,\nthis type may be augmented via interface merging."
       },
       "range": {
         "start": {
-          "line": 2,
+          "line": 1,
           "character": 0
         },
         "end": {
-          "line": 2,
+          "line": 1,
           "character": 11
         }
       }

@@ -35,7 +35,7 @@ Output::
   ],
   "size": 45
 }
-//// [/home/src/tslibs/TS/Lib/lib.d.ts] *Lib*
+//// [/home/src/tslibs/TS/Lib/lib.es2025.full.d.ts] *Lib*
 /// <reference no-default-lib="true"/>
 interface Boolean {}
 interface Function {}
@@ -61,7 +61,7 @@ declare const console: { log(msg: any): void; };
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -83,7 +83,7 @@ Output::
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -91,7 +91,7 @@ Signatures::
 Edit [1]:: With declaration enabled noEmit - Should report errors
 
 tsgo -b -v --noEmit --declaration
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [[90mHH:MM:SS AM[0m] Projects in this build: 
     * tsconfig.json
@@ -131,7 +131,7 @@ Found 1 error in a.ts[90m:1[0m
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -139,7 +139,7 @@ Signatures::
 Edit [2]:: With declaration and declarationMap noEmit - Should report errors
 
 tsgo -b -v --noEmit --declaration --declarationMap
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [[90mHH:MM:SS AM[0m] Projects in this build: 
     * tsconfig.json
@@ -165,7 +165,7 @@ Found 1 error in a.ts[90m:1[0m
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -200,7 +200,7 @@ Output::
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -208,7 +208,7 @@ Signatures::
 Edit [4]:: Dts Emit with error
 
 tsgo -b -v --declaration
-ExitStatus:: DiagnosticsPresent_OutputsGenerated
+ExitStatus:: DiagnosticsPresent_OutputsSkipped
 Output::
 [[90mHH:MM:SS AM[0m] Projects in this build: 
     * tsconfig.json
@@ -226,17 +226,13 @@ Output::
     [7m1[0m const a = class { private p = 10; };
     [7m [0m [96m      ~[0m
 
+[[90mHH:MM:SS AM[0m] Updating unchanged output timestamps of project 'tsconfig.json'...
+
 
 Found 1 error in a.ts[90m:1[0m
 
-//// [/home/src/projects/project/a.d.ts] *new* 
-declare const a: {
-    new (): {
-        p: number;
-    };
-};
-
 //// [/home/src/projects/project/a.js] *new* 
+"use strict";
 const a = class {
     p = 10;
 };
@@ -260,7 +256,7 @@ const a = class {
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -297,7 +293,7 @@ Output::
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -319,7 +315,7 @@ Output::
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -341,6 +337,6 @@ Output::
 
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::

@@ -47,7 +47,8 @@ new /*1*/A();
 		{ "path": "../a" }
 	]
 }`, disableSourceOfProjectReferenceRedirect)
-			f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			defer done()
 			f.VerifyBaselineFindAllReferences(t, "1")
 		})
 	}
@@ -129,7 +130,8 @@ export function fnUser() { a./*userFnA*/fnA(); b./*userFnB*/fnB(); a.instanceA; 
 /*dummy*/export const a = 10;
 // @Filename: dummy/tsconfig.json
 {}`
-			f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			defer done()
 			f.GoToMarker(t, tc.goToMarker)
 			// Ref projects are loaded after as part of this command
 			if strings.HasPrefix(tc.name, "Rename") {
@@ -218,7 +220,8 @@ export function fnUser() {
 /*dummy*/export const a = 10;
 // @Filename: dummy/tsconfig.json
 {}`
-	f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
 	f.GoToMarker(t, "user")
 	// Ref projects are loaded after as part of this command
 	f.VerifyBaselineWorkspaceSymbol(t, "fn")
@@ -263,7 +266,8 @@ export declare function f(): void;
 	"names":[],
 	"mappings":"AAAA,wBAAgB,CAAC,SAAK"
 }`
-	f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
 	f.VerifyBaselineFindAllReferences(t, "1")
 }
 
@@ -344,7 +348,8 @@ fn5();
 		t.Run("TestDeclarationMapsRenameWith"+tc.name, func(t *testing.T) {
 			t.Parallel()
 			defer testutil.RecoverAndFail(t, "Panic on fourslash test")
-			f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			defer done()
 			f.GoToMarker(t, "dummy")
 			// Ref projects are loaded after as part of this command
 			f.VerifyBaselineRename(t, nil /*preferences*/, "rename")
@@ -359,7 +364,8 @@ fn5();
 		t.Run("TestDeclarationMapsRenameWith"+tc.name+"Edit", func(t *testing.T) {
 			t.Parallel()
 			defer testutil.RecoverAndFail(t, "Panic on fourslash test")
-			f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			defer done()
 			// Ref projects are loaded after as part of this command
 			f.VerifyBaselineRename(t, nil /*preferences*/, "rename")
 			f.GoToMarker(t, "firstLine")
@@ -369,7 +375,8 @@ fn5();
 		t.Run("TestDeclarationMapsRenameWith"+tc.name+"EditEnd", func(t *testing.T) {
 			t.Parallel()
 			defer testutil.RecoverAndFail(t, "Panic on fourslash test")
-			f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+			defer done()
 			// Ref projects are loaded after as part of this command
 			f.VerifyBaselineRename(t, nil /*preferences*/, "rename")
 			f.GoToMarker(t, "lastLine")
@@ -377,4 +384,48 @@ fn5();
 			f.VerifyBaselineRename(t, nil /*preferences*/, "rename")
 		})
 	}
+}
+
+// TestDeclarationMapsNonMonotonicMappings verifies that getMappedLocation clamps
+// inverted ranges caused by non-monotonic source map mappings.
+//
+// The baseline comparison catches regressions: without the fix, the output shows
+// inverted markers (e.g., "|]|>" appearing before "<|"), while with the fix,
+// the ranges are clamped to valid zero-length ranges (e.g., "<||>").
+func TestDeclarationMapsNonMonotonicMappings(t *testing.T) {
+	t.Parallel()
+	defer testutil.RecoverAndFail(t, "Panic on fourslash test")
+	// The source map creates a non-monotonic mapping:
+	// - .d.ts line 0 col 24 ('b' identifier) -> source line 1, col 16
+	// - .d.ts line 0 col 25 (right after 'b') -> source line 0, col 0 (EARLIER!)
+	//
+	// When looking up 'b' identifier [24, 25), start maps to ~byte 39,
+	// but end maps to byte 0, creating an inverted range.
+	// The fix in getMappedLocation clamps this to prevent negative ranges.
+	const content = `
+// @Filename: /src/index.ts
+export function a() {}
+export function b() {}
+// @Filename: /src/indexdef.d.ts.map
+{
+	"version": 3,
+	"file": "indexdef.d.ts",
+	"sourceRoot": "",
+	"sources": ["index.ts"],
+	"names": [],
+	"mappings": "AACA,wBAAgB,CADhB;AAAA,wBAAgB"
+}
+// @Filename: /src/indexdef.d.ts
+export declare function b(): void;
+export declare function a(): void;
+//# sourceMappingURL=indexdef.d.ts.map
+// @Filename: /src/user.ts
+import { a, b } from "./indexdef";
+/*1*/a();
+/*2*/b();
+// @Filename: /src/tsconfig.json
+{}`
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
+	f.VerifyBaselineGoToDefinition(t, true, "1", "2")
 }

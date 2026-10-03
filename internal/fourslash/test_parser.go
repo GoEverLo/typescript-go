@@ -7,10 +7,11 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/go-json-experiment/json"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/json"
 	"github.com/microsoft/typescript-go/internal/ls/lsconv"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
+	"github.com/microsoft/typescript-go/internal/spanmap"
 	"github.com/microsoft/typescript-go/internal/stringutil"
 	"github.com/microsoft/typescript-go/internal/testrunner"
 	"github.com/microsoft/typescript-go/internal/tspath"
@@ -42,6 +43,13 @@ func (r *RangeMarker) GetName() *string {
 		return nil
 	}
 	return r.Marker.Name
+}
+
+func (r *RangeMarker) LSLocation() lsproto.Location {
+	return lsproto.Location{
+		Uri:   lsconv.FileNameToDocumentURI(r.fileName),
+		Range: r.LSRange,
+	}
 }
 
 type Marker struct {
@@ -146,7 +154,7 @@ func ParseTestData(t *testing.T, contents string, fileName string) TestData {
 
 	}
 
-	if hasTSConfig && len(globalOptions) > 0 && !isStateBaseliningEnabled(globalOptions) {
+	if hasTSConfig && hasUnsupportedGlobalOptionsWithConfig(globalOptions) && !isStateBaseliningEnabled(globalOptions) {
 		t.Fatalf("It is not allowed to use global options along with config files.")
 	}
 
@@ -158,6 +166,18 @@ func ParseTestData(t *testing.T, contents string, fileName string) TestData {
 		GlobalOptions:   globalOptions,
 		Ranges:          ranges,
 	}
+}
+
+func hasUnsupportedGlobalOptionsWithConfig(globalOptions map[string]string) bool {
+	for option := range globalOptions {
+		switch strings.ToLower(option) {
+		case "symlink", "link", "usecasesensitivefilenames":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func isConfigFile(fileName string) bool {
@@ -182,6 +202,7 @@ type TestFileInfo struct {
 	// The contents of the file (with markers, etc stripped out)
 	Content string
 	emit    bool
+	open    bool
 }
 
 // FileName implements lsconv.Script.
@@ -189,14 +210,26 @@ func (t *TestFileInfo) FileName() string {
 	return t.fileName
 }
 
+// OriginalFileName implements lsconv.Script.
+func (t *TestFileInfo) OriginalFileName() string { return t.fileName }
+
 // Text implements lsconv.Script.
 func (t *TestFileInfo) Text() string {
 	return t.Content
 }
 
+// OriginalText implements lsconv.Script.
+func (t *TestFileInfo) OriginalText() string { return t.Content }
+
+// SpanMap implements lsconv.Script.
+func (t *TestFileInfo) SpanMap() *spanmap.SpanMap { return nil }
+
 var _ lsconv.Script = (*TestFileInfo)(nil)
 
-const emitThisFileOption = "emitthisfile"
+const (
+	emitThisFileOption = "emitthisfile"
+	noOpenFileOption   = "noopen"
+)
 
 type parserState int
 
@@ -208,6 +241,7 @@ const (
 
 func parseFileContent(fileName string, content string, fileOptions map[string]string) (*testFileWithMarkers, error) {
 	fileName = tspath.GetNormalizedAbsolutePath(fileName, "/")
+	content = chompLeadingSpace(content)
 
 	// The file content (minus metacharacters) so far
 	var output strings.Builder
@@ -282,7 +316,7 @@ func parseFileContent(fileName string, content string, fileOptions map[string]st
 				flush(i - 1)
 				lastNormalCharPosition = i + 1
 				difference += 2
-			} else if previousCharacter == '/' && currentCharacter == '*' {
+			} else if previousCharacter == '/' && currentCharacter == '*' && (i+1 >= len(content) || content[i+1] != '/') {
 				// found a possible marker start
 				state = stateInSlashStarMarker
 				openMarker = &locationInformation{
@@ -372,7 +406,11 @@ func parseFileContent(fileName string, content string, fileOptions map[string]st
 			continue
 		}
 		column++
-		previousCharacter = currentCharacter
+		if i >= lastNormalCharPosition {
+			previousCharacter = currentCharacter
+		} else {
+			previousCharacter = utf8.RuneError // reset to avoid accidentally reusing marker delimiters as part of other markers
+		}
 	}
 
 	// Add the remaining text
@@ -390,9 +428,9 @@ func parseFileContent(fileName string, content string, fileOptions map[string]st
 	outputString := output.String()
 	// Set LS positions for markers
 	lineMap := lsconv.ComputeLSPLineStarts(outputString)
-	converters := lsconv.NewConverters(lsproto.PositionEncodingKindUTF8, func(_ string) *lsconv.LSPLineMap {
+	converters := newTestConverters(lsconv.NewConverters(lsproto.PositionEncodingKindUTF8, func(_ string) *lsconv.LSPLineMap {
 		return lineMap
-	})
+	}))
 
 	emit := fileOptions[emitThisFileOption] == "true"
 
@@ -400,6 +438,7 @@ func parseFileContent(fileName string, content string, fileOptions map[string]st
 		fileName: fileName,
 		Content:  outputString,
 		emit:     emit,
+		open:     fileOptions[noOpenFileOption] != "true",
 	}
 
 	slices.SortStableFunc(rangeMarkers, func(a, b *RangeMarker) int {
@@ -457,6 +496,23 @@ func getObjectMarker(fileName string, location *locationInformation, text string
 
 func reportError(fileName string, line int, col int, message string) error {
 	return &fourslashError{fmt.Sprintf("%v (%v,%v): %v", fileName, line, col, message)}
+}
+
+func chompLeadingSpace(content string) string {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		if len(line) > 0 && line[0] != ' ' {
+			return content
+		}
+	}
+
+	result := make([]string, len(lines))
+	for i, line := range lines {
+		if len(line) > 0 {
+			result[i] = line[1:]
+		}
+	}
+	return strings.Join(result, "\n")
 }
 
 type fourslashError struct {

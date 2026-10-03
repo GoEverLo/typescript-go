@@ -1,7 +1,10 @@
 package build
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -9,9 +12,13 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/contentmapper"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/diagnostics"
+	"github.com/microsoft/typescript-go/internal/execute/incremental"
 	"github.com/microsoft/typescript-go/internal/execute/tsc"
+	"github.com/microsoft/typescript-go/internal/execute/watchmanager"
+	"github.com/microsoft/typescript-go/internal/fswatch"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
 	"github.com/microsoft/typescript-go/internal/vfs/cachedvfs"
@@ -43,7 +50,8 @@ func (b *orchestratorResult) report(o *Orchestrator) {
 				strings.Join(core.Map(b.filesToDelete, func(f string) string {
 					return "\r\n * " + f
 				}), ""),
-			))
+			),
+		)
 	}
 	if !o.opts.Command.CompilerOptions.Diagnostics.IsTrue() && !o.opts.Command.CompilerOptions.ExtendedDiagnostics.IsTrue() {
 		return
@@ -57,6 +65,11 @@ type Orchestrator struct {
 	comparePathsOptions tspath.ComparePathsOptions
 	host                *host
 
+	// contentMapperHost transforms content-mapped files; it is created once per build session (when
+	// enabled) and shared across all projects so mapper processes are consolidated. It closes itself when
+	// the session context is cancelled (see contentmapper.New).
+	contentMapperHost contentmapper.Host
+
 	// order generation result
 	tasks  *collections.SyncMap[tspath.Path, *BuildTask]
 	order  []string
@@ -64,6 +77,9 @@ type Orchestrator struct {
 
 	errorSummaryReporter tsc.DiagnosticsReporter
 	watchStatusReporter  tsc.DiagnosticReporter
+
+	// fswatch event-based watching
+	wm *watchmanager.WatchManager
 }
 
 var _ tsc.Watcher = (*Orchestrator)(nil)
@@ -74,6 +90,13 @@ func (o *Orchestrator) relativeFileName(fileName string) string {
 
 func (o *Orchestrator) toPath(fileName string) tspath.Path {
 	return tspath.ToPath(fileName, o.comparePathsOptions.CurrentDirectory, o.comparePathsOptions.UseCaseSensitiveFileNames)
+}
+
+func (o *Orchestrator) resolveBuildInfoFileName(fileName string, buildInfoDir string) string {
+	if incremental.IsBuildInfoFileNameDefaultLibrary(fileName) {
+		return tspath.CombinePaths(o.host.DefaultLibraryPath(), fileName)
+	}
+	return tspath.GetNormalizedAbsolutePath(fileName, buildInfoDir)
 }
 
 func (o *Orchestrator) Order() []string {
@@ -116,6 +139,9 @@ func (o *Orchestrator) createBuildTasks(oldTasks *collections.SyncMap[tspath.Pat
 						// Reuse existing task if config is same
 						task = existing
 					} else {
+						if existing.contentMapperProject != nil {
+							_ = existing.contentMapperProject.Close()
+						}
 						buildInfo = existing.buildInfoEntry
 					}
 				}
@@ -205,47 +231,67 @@ func (o *Orchestrator) GenerateGraph(oldTasks *collections.SyncMap[tspath.Path, 
 	for _, project := range projects {
 		o.setupBuildTask(project, nil, false, &completed, &analyzing, circularityStack)
 	}
+	if oldTasks != nil {
+		oldTasks.Range(func(path tspath.Path, oldTask *BuildTask) bool {
+			if task, ok := o.tasks.Load(path); ok && task == oldTask {
+				return true
+			}
+			if oldTask.contentMapperProject != nil {
+				_ = oldTask.contentMapperProject.Close()
+			}
+			return true
+		})
+	}
 }
 
-func (o *Orchestrator) Start() tsc.CommandLineResult {
+func (o *Orchestrator) Start(ctx context.Context) tsc.CommandLineResult {
+	o.contentMapperHost = tsc.NewContentMapperHost(ctx, o.opts.Sys, o.opts.Command.CompilerOptions)
+	if o.contentMapperHost != nil && (!o.opts.Command.CompilerOptions.Watch.IsTrue() || o.opts.Testing == nil) {
+		defer o.contentMapperHost.Close()
+	}
 	if o.opts.Command.CompilerOptions.Watch.IsTrue() {
 		o.watchStatusReporter(ast.NewCompilerDiagnostic(diagnostics.Starting_compilation_in_watch_mode))
 	}
 	o.GenerateGraph(nil)
 	result := o.buildOrClean()
 	if o.opts.Command.CompilerOptions.Watch.IsTrue() {
-		o.Watch()
+		o.Watch(ctx)
 		result.Watcher = o
 	}
 	return result
 }
 
-func (o *Orchestrator) Watch() {
+func (o *Orchestrator) Watch(ctx context.Context) {
+	o.wm.Lock()
+
+	if o.opts.Testing == nil {
+		if o.opts.Sys.GetEnvironmentVariable("TS_WATCH_DEBUG") != "" {
+			o.wm.DebugLog = o.opts.Sys.Writer()
+		}
+		o.wm.EnsureDefaultBackend()
+	}
+
 	o.updateWatch()
+	desiredDirs := o.computeDesiredWatches()
+	if err := o.wm.ReconcileWatches(desiredDirs); err != nil {
+		fmt.Fprintf(o.opts.Sys.Writer(), "%v\n", err)
+		o.wm.ForceOverflow()
+	}
 	o.resetCaches()
 
-	// Start watching for file changes
+	o.wm.Unlock()
+
 	if o.opts.Testing == nil {
-		watchInterval := o.opts.Command.WatchOptions.WatchInterval()
-		for {
-			// Testing mode: run a single cycle and exit
-			time.Sleep(watchInterval)
-			o.DoCycle()
-		}
+		o.wm.RunLoop(ctx, o.DoCycle)
 	}
 }
 
 func (o *Orchestrator) updateWatch() {
 	oldCache := o.host.mTimes
 	o.host.mTimes = &collections.SyncMap[tspath.Path, time.Time]{}
-	wg := core.NewWorkGroup(o.opts.Command.CompilerOptions.SingleThreaded.IsTrue())
-	o.tasks.Range(func(path tspath.Path, task *BuildTask) bool {
-		wg.Queue(func() {
-			task.updateWatch(o, oldCache)
-		})
-		return true
+	o.rangeTask(func(path tspath.Path, task *BuildTask) {
+		task.updateWatch(o, oldCache)
 	})
-	wg.RunAndWait()
 }
 
 func (o *Orchestrator) resetCaches() {
@@ -257,27 +303,339 @@ func (o *Orchestrator) resetCaches() {
 	o.host.configTimes = collections.SyncMap[tspath.Path, time.Duration]{}
 }
 
-func (o *Orchestrator) DoCycle() {
-	var needsConfigUpdate atomic.Bool
-	var needsUpdate atomic.Bool
-	mTimes := o.host.mTimes.Clone()
-	wg := core.NewWorkGroup(o.opts.Command.CompilerOptions.SingleThreaded.IsTrue())
-	o.tasks.Range(func(path tspath.Path, task *BuildTask) bool {
-		wg.Queue(func() {
-			if updateKind := task.hasUpdate(o, path); updateKind != updateKindNone {
+func (o *Orchestrator) checkTasksForEventChanges(changedPaths map[string]fswatch.EventKind, needsConfigUpdate, needsUpdate *atomic.Bool) {
+	normalizedPaths := make(map[tspath.Path]fswatch.EventKind, len(changedPaths))
+	for eventPath, kind := range changedPaths {
+		normalizedPaths[o.toPath(eventPath)] = kind
+	}
+
+	for i := range o.order {
+		config := o.order[i]
+		path := o.toPath(config)
+		task := o.getTask(path)
+
+		configPath := o.toPath(task.config)
+		if _, changed := normalizedPaths[configPath]; changed {
+			task.resetConfig(o, path)
+			needsConfigUpdate.Store(true)
+			needsUpdate.Store(true)
+			continue
+		}
+
+		if task.resolved == nil {
+			continue
+		}
+
+		configChanged := false
+		for _, file := range task.resolved.ExtendedSourceFiles() {
+			fp := o.toPath(file)
+			if _, changed := normalizedPaths[fp]; changed {
+				task.resetConfig(o, path)
+				needsConfigUpdate.Store(true)
 				needsUpdate.Store(true)
-				if updateKind == updateKindConfig {
-					needsConfigUpdate.Store(true)
+				configChanged = true
+				break
+			}
+		}
+		if configChanged {
+			continue
+		}
+		for _, mapper := range task.resolved.ContentMappers() {
+			if mapper.PackageDirectory == "" || mapper.ContributionID != "" {
+				continue
+			}
+			manifestPath := o.toPath(tspath.CombinePaths(mapper.PackageDirectory, "package.json"))
+			if _, changed := normalizedPaths[manifestPath]; changed {
+				task.resetConfig(o, path)
+				needsConfigUpdate.Store(true)
+				needsUpdate.Store(true)
+				configChanged = true
+				break
+			}
+		}
+		if configChanged {
+			continue
+		}
+
+		rootChanged := false
+		if task.contentMapperProject != nil {
+			watchedFiles, err := task.contentMapperProject.WatchedFiles()
+			if err != nil {
+				task.contentMapperProjectErr = err
+				task.resetStatus()
+				needsUpdate.Store(true)
+				rootChanged = true
+			}
+			for _, fileName := range watchedFiles {
+				if _, changed := normalizedPaths[o.toPath(fileName)]; changed {
+					task.refreshContentMapperProject(o)
+					task.resetStatus()
+					needsUpdate.Store(true)
+					rootChanged = true
+					break
 				}
 			}
-		})
-		// Watch for file changes
-		return true
-	})
-	wg.RunAndWait()
+		}
+		fileNames := task.resolved.FileNames()
+		roots := collections.NewSetWithSizeHint[tspath.Path](len(fileNames))
+		for _, file := range fileNames {
+			fp := o.toPath(file)
+			roots.Add(fp)
+			if !rootChanged {
+				if _, changed := normalizedPaths[fp]; changed {
+					task.resetStatus()
+					needsUpdate.Store(true)
+					rootChanged = true
+				}
+			}
+		}
+
+		if !rootChanged {
+			task.buildInfoEntryMu.Lock()
+			bi := task.buildInfoEntry
+			task.buildInfoEntryMu.Unlock()
+			if bi != nil && bi.buildInfo != nil {
+				buildInfoDir := tspath.GetDirectoryPath(string(bi.path))
+				for _, fileName := range bi.buildInfo.FileNames {
+					fp := o.toPath(o.resolveBuildInfoFileName(fileName, buildInfoDir))
+					if roots.Has(fp) {
+						continue
+					}
+					if _, changed := normalizedPaths[fp]; changed {
+						task.resetStatus()
+						needsUpdate.Store(true)
+						break
+					}
+				}
+				for packageJson := range bi.buildInfo.GetPackageJsons(buildInfoDir) {
+					if o.packageJsonLookupChanged(packageJson, normalizedPaths) {
+						task.resetStatus()
+						needsUpdate.Store(true)
+						break
+					}
+				}
+				for packageJson := range bi.buildInfo.GetMissingPackageJsons(buildInfoDir) {
+					if o.packageJsonLookupChanged(packageJson, normalizedPaths) {
+						task.resetStatus()
+						needsUpdate.Store(true)
+						break
+					}
+				}
+			}
+			for _, packageJson := range task.packageJsons {
+				if o.packageJsonLookupChanged(packageJson, normalizedPaths) {
+					task.resetStatus()
+					needsUpdate.Store(true)
+					break
+				}
+			}
+		}
+
+		task.reportDone = make(chan struct{})
+		task.done = make(chan struct{})
+
+		newConfig := task.resolved.ReloadFileNamesOfParsedCommandLine(o.host.FS())
+		if !slices.Equal(task.resolved.FileNames(), newConfig.FileNames()) {
+			o.host.resolvedReferences.store(path, newConfig)
+			task.resolved = newConfig
+			task.resetStatus()
+			needsUpdate.Store(true)
+		}
+	}
 
 	if !needsUpdate.Load() {
-		o.host.mTimes = mTimes
+		opts := o.comparePathsOptions
+		for eventPath := range changedPaths {
+			if o.host.FS().DirectoryExists(eventPath) {
+				if o.wm.IsPathUnderWatch(eventPath, opts) {
+					o.rangeTask(func(path tspath.Path, task *BuildTask) {
+						task.resetStatus()
+						task.reportDone = make(chan struct{})
+						task.done = make(chan struct{})
+					})
+					needsUpdate.Store(true)
+					break
+				}
+			}
+		}
+	}
+}
+
+func (o *Orchestrator) packageJsonLookupChanged(packageJson string, changedPaths map[tspath.Path]fswatch.EventKind) bool {
+	packageJsonPath := o.toPath(packageJson)
+	if _, changed := changedPaths[packageJsonPath]; changed {
+		return true
+	}
+	for changedPath, kind := range changedPaths {
+		if kind == fswatch.EventDelete && tspath.ContainsPath(string(changedPath), string(packageJsonPath), o.comparePathsOptions) {
+			return true
+		}
+	}
+	return false
+}
+
+func (o *Orchestrator) computeDesiredWatches() map[string]bool {
+	desiredDirs := watchmanager.NewDirWatchSet(o.comparePathsOptions)
+
+	for i := range o.order {
+		config := o.order[i]
+		path := o.toPath(config)
+		task := o.getTask(path)
+
+		// Watch config file directory
+		configDir := tspath.GetDirectoryPath(task.config)
+		realConfigDir := o.host.FS().Realpath(configDir)
+		desiredDirs.Set(realConfigDir, false)
+
+		if task.resolved == nil {
+			continue
+		}
+
+		// Extended config file directories
+		for _, cfgPath := range task.resolved.ExtendedSourceFiles() {
+			realPath := o.host.FS().Realpath(cfgPath)
+			dir := tspath.GetDirectoryPath(realPath)
+			desiredDirs.Set(dir, false)
+		}
+
+		// Wildcard directories from tsconfig
+		for dir, recursive := range task.resolved.WildcardDirectories() {
+			realDir := o.host.FS().Realpath(dir)
+			desiredDirs.Set(realDir, recursive)
+		}
+
+		// Input file directories not already covered
+		for _, fileName := range task.resolved.FileNames() {
+			absPath := tspath.GetNormalizedAbsolutePath(fileName, o.opts.Sys.GetCurrentDirectory())
+			dir := tspath.GetDirectoryPath(absPath)
+			if !desiredDirs.Covered(dir) && watchmanager.CanWatchDirectory(dir) {
+				desiredDirs.Set(dir, false)
+			}
+			for _, mapper := range task.resolved.ContentMappers() {
+				if mapper.PackageDirectory == "" || mapper.ContributionID != "" {
+					continue
+				}
+				manifestPath := o.host.FS().Realpath(tspath.CombinePaths(mapper.PackageDirectory, "package.json"))
+				dir := tspath.GetDirectoryPath(manifestPath)
+				if !desiredDirs.Covered(dir) && watchmanager.CanWatchDirectory(dir) {
+					desiredDirs.Set(dir, false)
+				}
+			}
+		}
+		if task.contentMapperProject != nil {
+			watchedFiles, err := task.contentMapperProject.WatchedFiles()
+			if err != nil {
+				task.contentMapperProjectErr = err
+			}
+			for _, fileName := range watchedFiles {
+				absPath := o.host.FS().Realpath(fileName)
+				dir := tspath.GetDirectoryPath(absPath)
+				if !desiredDirs.Covered(dir) && watchmanager.CanWatchDirectory(dir) {
+					desiredDirs.Set(dir, false)
+				}
+			}
+		}
+
+		// Non-root dependency directories from buildinfo (e.g. node_modules .d.ts files).
+		task.buildInfoEntryMu.Lock()
+		bi := task.buildInfoEntry
+		task.buildInfoEntryMu.Unlock()
+		if bi != nil && bi.buildInfo != nil {
+			buildInfoDir := tspath.GetDirectoryPath(string(bi.path))
+			roots := collections.NewSetFromItems(core.Map(task.resolved.FileNames(), o.toPath)...)
+			for _, fileName := range bi.buildInfo.FileNames {
+				absPath := o.host.FS().Realpath(o.resolveBuildInfoFileName(fileName, buildInfoDir))
+				fp := o.toPath(absPath)
+				if roots.Has(fp) {
+					continue
+				}
+				dir := tspath.GetDirectoryPath(absPath)
+				if !desiredDirs.Covered(dir) && watchmanager.CanWatchDirectory(dir) {
+					desiredDirs.Set(dir, false)
+				}
+			}
+			for packageJson := range bi.buildInfo.GetPackageJsons(buildInfoDir) {
+				o.addPackageJsonWatchDirs(desiredDirs, packageJson)
+			}
+			for packageJson := range bi.buildInfo.GetMissingPackageJsons(buildInfoDir) {
+				o.addPackageJsonWatchDirs(desiredDirs, packageJson)
+			}
+		}
+		for _, packageJson := range task.packageJsons {
+			o.addPackageJsonWatchDirs(desiredDirs, packageJson)
+		}
+	}
+
+	return o.wm.ResolveDesiredDirs(desiredDirs.Dirs())
+}
+
+func (o *Orchestrator) addWatchDir(desiredDirs *watchmanager.DirWatchSet, dir string) {
+	if !desiredDirs.Covered(dir) && watchmanager.CanWatchDirectory(dir) {
+		desiredDirs.Set(dir, false)
+	}
+}
+
+func (o *Orchestrator) addPackageJsonWatchDirs(desiredDirs *watchmanager.DirWatchSet, packageJson string) {
+	dir := tspath.GetDirectoryPath(packageJson)
+	dirs := []string{dir}
+	foundNodeModules := false
+	for current := dir; ; {
+		parent := tspath.GetDirectoryPath(current)
+		if parent == "" || parent == current {
+			break
+		}
+		dirs = append(dirs, parent)
+		if tspath.GetBaseFileName(parent) == "node_modules" {
+			foundNodeModules = true
+			if grandparent := tspath.GetDirectoryPath(parent); grandparent != "" && grandparent != parent {
+				dirs = append(dirs, grandparent)
+			}
+			break
+		}
+		current = parent
+	}
+
+	if !foundNodeModules {
+		o.addWatchDir(desiredDirs, dir)
+		return
+	}
+	for _, dir := range dirs {
+		o.addWatchDir(desiredDirs, dir)
+	}
+}
+
+func (o *Orchestrator) DoCycle() {
+	o.wm.Lock()
+	defer o.wm.Unlock()
+
+	changedPaths, overflow := o.wm.DrainEvents()
+	hasEvents := len(changedPaths) > 0 || overflow
+
+	if !hasEvents {
+		if o.wm.DebugLog != nil {
+			fmt.Fprintf(o.wm.DebugLog, "[watch] DoCycle: no events, skipping\n")
+		}
+		return
+	}
+
+	var needsConfigUpdate atomic.Bool
+	var needsUpdate atomic.Bool
+
+	if overflow {
+		// Overflow: reset all tasks to force a full rebuild.
+		o.rangeTask(func(path tspath.Path, task *BuildTask) {
+			task.resetConfig(o, path)
+			task.reportDone = make(chan struct{})
+			task.done = make(chan struct{})
+		})
+		needsConfigUpdate.Store(true)
+		needsUpdate.Store(true)
+	} else {
+		// Event-driven: check only tasks affected by changed paths
+		o.checkTasksForEventChanges(changedPaths, &needsConfigUpdate, &needsUpdate)
+	}
+
+	if !needsUpdate.Load() {
 		o.resetCaches()
 		return
 	}
@@ -290,6 +648,12 @@ func (o *Orchestrator) DoCycle() {
 
 	o.buildOrClean()
 	o.updateWatch()
+	desiredDirs := o.computeDesiredWatches()
+	if err := o.wm.ReconcileWatches(desiredDirs); err != nil {
+		fmt.Fprintf(o.opts.Sys.Writer(), "%v\n", err)
+		// Mark overflow so the next event triggers a full rebuild
+		o.wm.ForceOverflow()
+	}
 	o.resetCaches()
 }
 
@@ -305,11 +669,9 @@ func (o *Orchestrator) buildOrClean() tsc.CommandLineResult {
 	var buildResult orchestratorResult
 	if len(o.errors) == 0 {
 		buildResult.statistics.Projects = len(o.Order())
-		if o.opts.Command.CompilerOptions.SingleThreaded.IsTrue() {
-			o.singleThreadedBuildOrClean(&buildResult)
-		} else {
-			o.multiThreadedBuildOrClean(&buildResult)
-		}
+		o.rangeTask(func(path tspath.Path, task *BuildTask) {
+			o.buildOrCleanProject(task, path, &buildResult)
+		})
 	} else {
 		// Circularity errors prevent any project from being built
 		buildResult.result.Status = tsc.ExitStatusProjectReferenceCycle_OutputsSkipped
@@ -323,25 +685,40 @@ func (o *Orchestrator) buildOrClean() tsc.CommandLineResult {
 	return buildResult.result
 }
 
-func (o *Orchestrator) singleThreadedBuildOrClean(buildResult *orchestratorResult) {
-	// Go in the order since only one project can be built at a time so that random order isnt picked by work group creating deadlock
-	for _, config := range o.Order() {
+func (o *Orchestrator) rangeTask(f func(path tspath.Path, task *BuildTask)) {
+	numRoutines := 4
+	if o.opts.Command.CompilerOptions.SingleThreaded.IsTrue() {
+		numRoutines = 1
+	} else if builders := o.opts.Command.BuildOptions.Builders; builders != nil {
+		numRoutines = *builders
+	}
+
+	var currentTaskIndex atomic.Int64
+	getNextTask := func() (tspath.Path, *BuildTask, bool) {
+		index := int(currentTaskIndex.Add(1) - 1)
+		if index >= len(o.order) {
+			return "", nil, false
+		}
+		config := o.order[index]
 		path := o.toPath(config)
 		task := o.getTask(path)
-		o.buildOrCleanProject(task, path, buildResult)
+		return path, task, true
 	}
-}
+	runTask := func() {
+		for path, task, ok := getNextTask(); ok; path, task, ok = getNextTask() {
+			f(path, task)
+		}
+	}
 
-func (o *Orchestrator) multiThreadedBuildOrClean(buildResult *orchestratorResult) {
-	// Spin off the threads with waiting on upstream to build before actual project build
-	wg := core.NewWorkGroup(false)
-	o.tasks.Range(func(path tspath.Path, task *BuildTask) bool {
-		wg.Queue(func() {
-			o.buildOrCleanProject(task, path, buildResult)
-		})
-		return true
-	})
-	wg.RunAndWait()
+	if numRoutines == 1 {
+		runTask()
+	} else {
+		wg := core.NewWorkGroup(false)
+		for range numRoutines {
+			wg.Queue(runTask)
+		}
+		wg.RunAndWait()
+	}
 }
 
 func (o *Orchestrator) buildOrCleanProject(task *BuildTask, path tspath.Path, buildResult *orchestratorResult) {
@@ -372,6 +749,7 @@ func (o *Orchestrator) createDiagnosticReporter(task *BuildTask) tsc.DiagnosticR
 }
 
 func NewOrchestrator(opts Options) *Orchestrator {
+	wm := watchmanager.NewWatchManager(opts.Sys.Writer(), opts.Sys.FS().DirectoryExists)
 	orchestrator := &Orchestrator{
 		opts: opts,
 		comparePathsOptions: tspath.ComparePathsOptions{
@@ -379,6 +757,7 @@ func NewOrchestrator(opts Options) *Orchestrator {
 			UseCaseSensitiveFileNames: opts.Sys.FS().UseCaseSensitiveFileNames(),
 		},
 		tasks: &collections.SyncMap[tspath.Path, *BuildTask]{},
+		wm:    wm,
 	}
 	orchestrator.host = &host{
 		orchestrator: orchestrator,
@@ -388,11 +767,15 @@ func NewOrchestrator(opts Options) *Orchestrator {
 			orchestrator.opts.Sys.DefaultLibraryPath(),
 			nil,
 			nil,
+			nil,
 		),
 		mTimes: &collections.SyncMap[tspath.Path, time.Time]{},
 	}
 	if opts.Command.CompilerOptions.Watch.IsTrue() {
 		orchestrator.watchStatusReporter = tsc.CreateWatchStatusReporter(opts.Sys, opts.Command.Locale(), opts.Command.CompilerOptions, opts.Testing)
+		if t, ok := opts.Testing.(watchmanager.CommandLineTestingWithWatchBackend); ok {
+			wm.SetBackend(t.WatchBackend())
+		}
 	} else {
 		orchestrator.errorSummaryReporter = tsc.CreateReportErrorSummary(opts.Sys, opts.Command.Locale(), opts.Command.CompilerOptions)
 	}

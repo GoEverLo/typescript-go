@@ -24,15 +24,18 @@
 // t("!", 12, false);
 //   ^
 // | ----------------------------------------------------------------------
-// | t(**eventName: string**, eventName2: string | number, eventName3: any): number
+// | t(**eventName: string**, eventName2: number | string, eventName3: any): number
+// | - `eventName: string`: - So many words
 // | ----------------------------------------------------------------------
 //        ^
 // | ----------------------------------------------------------------------
-// | t(eventName: string, **eventName2: string | number**, eventName3: any): number
+// | t(eventName: string, **eventName2: number | string**, eventName3: any): number
+// | - `eventName2: number | string`: - Silence is golden
 // | ----------------------------------------------------------------------
 //            ^
 // | ----------------------------------------------------------------------
-// | t(eventName: string, eventName2: string | number, **eventName3: any**): number
+// | t(eventName: string, eventName2: number | string, **eventName3: any**): number
+// | - `eventName3: any`: - Osterreich mos def
 // | ----------------------------------------------------------------------
 [
   {
@@ -48,22 +51,34 @@
     "item": {
       "signatures": [
         {
-          "label": "t(eventName: string, eventName2: string | number, eventName3: any): number",
+          "label": "t(eventName: string, eventName2: number | string, eventName3: any): number",
           "parameters": [
             {
-              "label": "eventName: string"
+              "label": "eventName: string",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- So many words"
+              }
             },
             {
-              "label": "eventName2: string | number"
+              "label": "eventName2: number | string",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- Silence is golden"
+              }
             },
             {
-              "label": "eventName3: any"
+              "label": "eventName3: any",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- Osterreich mos def"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -79,22 +94,34 @@
     "item": {
       "signatures": [
         {
-          "label": "t(eventName: string, eventName2: string | number, eventName3: any): number",
+          "label": "t(eventName: string, eventName2: number | string, eventName3: any): number",
           "parameters": [
             {
-              "label": "eventName: string"
+              "label": "eventName: string",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- So many words"
+              }
             },
             {
-              "label": "eventName2: string | number"
+              "label": "eventName2: number | string",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- Silence is golden"
+              }
             },
             {
-              "label": "eventName3: any"
+              "label": "eventName3: any",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- Osterreich mos def"
+              }
             }
-          ]
+          ],
+          "activeParameter": 1
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 1
+      "activeSignature": 0
     }
   },
   {
@@ -110,22 +137,34 @@
     "item": {
       "signatures": [
         {
-          "label": "t(eventName: string, eventName2: string | number, eventName3: any): number",
+          "label": "t(eventName: string, eventName2: number | string, eventName3: any): number",
           "parameters": [
             {
-              "label": "eventName: string"
+              "label": "eventName: string",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- So many words"
+              }
             },
             {
-              "label": "eventName2: string | number"
+              "label": "eventName2: number | string",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- Silence is golden"
+              }
             },
             {
-              "label": "eventName3: any"
+              "label": "eventName3: any",
+              "documentation": {
+                "kind": "markdown",
+                "value": "- Osterreich mos def"
+              }
             }
-          ]
+          ],
+          "activeParameter": 2
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 2
+      "activeSignature": 0
     }
   }
 ]

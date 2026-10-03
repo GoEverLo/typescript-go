@@ -8,35 +8,63 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/contentmapper"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/diagnostics"
 	"github.com/microsoft/typescript-go/internal/execute/build"
 	"github.com/microsoft/typescript-go/internal/execute/incremental"
 	"github.com/microsoft/typescript-go/internal/execute/tsc"
 	"github.com/microsoft/typescript-go/internal/format"
-	"github.com/microsoft/typescript-go/internal/jsonutil"
+	"github.com/microsoft/typescript-go/internal/json"
 	"github.com/microsoft/typescript-go/internal/locale"
+	"github.com/microsoft/typescript-go/internal/ls/lsutil"
 	"github.com/microsoft/typescript-go/internal/parser"
 	"github.com/microsoft/typescript-go/internal/pprof"
+	"github.com/microsoft/typescript-go/internal/tracing"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
 
-func CommandLine(sys tsc.System, commandLineArgs []string, testing tsc.CommandLineTesting) tsc.CommandLineResult {
+func startTracingIfNeeded(sys tsc.System, config *tsoptions.ParsedCommandLine, testing tsc.CommandLineTesting) *tracing.Tracing {
+	traceDir := config.CompilerOptions().GenerateTrace
+	if traceDir == "" {
+		return nil
+	}
+	configFilePath := ""
+	if config.ConfigFile != nil && config.ConfigFile.SourceFile != nil {
+		configFilePath = config.ConfigFile.SourceFile.FileName()
+	}
+	tr, err := tracing.StartTracing(sys.FS(), traceDir, configFilePath, testing != nil)
+	if err != nil {
+		fmt.Fprintf(sys.Writer(), "Warning: Failed to start tracing: %v\n", err)
+	}
+	return tr
+}
+
+func stopTracing(sys tsc.System, tr *tracing.Tracing) {
+	if tr == nil {
+		return
+	}
+	if err := tr.StopTracing(); err != nil {
+		fmt.Fprintf(sys.Writer(), "Warning: Failed to stop tracing: %v\n", err)
+	}
+}
+
+func CommandLine(ctx context.Context, sys tsc.System, commandLineArgs []string, testing tsc.CommandLineTesting) tsc.CommandLineResult {
 	if len(commandLineArgs) > 0 {
 		switch strings.ToLower(commandLineArgs[0]) {
 		case "-b", "--b", "-build", "--build":
-			return tscBuildCompilation(sys, tsoptions.ParseBuildCommandLine(commandLineArgs, sys), testing)
+			return tscBuildCompilation(ctx, sys, tsoptions.ParseBuildCommandLine(commandLineArgs, sys), testing)
 			// case "-f":
 			// 	return fmtMain(sys, commandLineArgs[1], commandLineArgs[1])
 		}
 	}
 
-	return tscCompilation(sys, tsoptions.ParseCommandLine(commandLineArgs, sys), testing)
+	return tscCompilation(ctx, sys, tsoptions.ParseCommandLine(commandLineArgs, sys), testing)
 }
 
 func fmtMain(sys tsc.System, input, output string) tsc.ExitStatus {
-	ctx := format.WithFormatCodeSettings(context.Background(), format.GetDefaultFormatCodeSettings("\n"), "\n")
+	ctx := format.WithFormatCodeSettings(context.Background(), lsutil.GetDefaultFormatCodeSettings(), "\n")
 	input = string(tspath.ToPath(input, sys.GetCurrentDirectory(), sys.FS().UseCaseSensitiveFileNames()))
 	output = string(tspath.ToPath(output, sys.GetCurrentDirectory(), sys.FS().UseCaseSensitiveFileNames()))
 	fileContent, ok := sys.FS().ReadFile(input)
@@ -47,21 +75,20 @@ func fmtMain(sys tsc.System, input, output string) tsc.ExitStatus {
 	text := fileContent
 	pathified := tspath.ToPath(input, sys.GetCurrentDirectory(), true)
 	sourceFile := parser.ParseSourceFile(ast.SourceFileParseOptions{
-		FileName:         string(pathified),
-		Path:             pathified,
-		JSDocParsingMode: ast.JSDocParsingModeParseAll,
+		FileName: string(pathified),
+		Path:     pathified,
 	}, text, core.GetScriptKindFromFileName(string(pathified)))
 	edits := format.FormatDocument(ctx, sourceFile)
 	newText := core.ApplyBulkEdits(text, edits)
 
-	if err := sys.FS().WriteFile(output, newText, false); err != nil {
+	if err := sys.FS().WriteFile(output, newText); err != nil {
 		fmt.Fprintln(sys.Writer(), err.Error())
 		return tsc.ExitStatusNotImplemented
 	}
 	return tsc.ExitStatusSuccess
 }
 
-func tscBuildCompilation(sys tsc.System, buildCommand *tsoptions.ParsedBuildCommandLine, testing tsc.CommandLineTesting) tsc.CommandLineResult {
+func tscBuildCompilation(ctx context.Context, sys tsc.System, buildCommand *tsoptions.ParsedBuildCommandLine, testing tsc.CommandLineTesting) tsc.CommandLineResult {
 	locale := buildCommand.Locale()
 	reportDiagnostic := tsc.CreateDiagnosticReporter(sys, sys.Writer(), locale, buildCommand.CompilerOptions)
 
@@ -89,10 +116,10 @@ func tscBuildCompilation(sys tsc.System, buildCommand *tsoptions.ParsedBuildComm
 		Command: buildCommand,
 		Testing: testing,
 	})
-	return orchestrator.Start()
+	return orchestrator.Start(ctx)
 }
 
-func tscCompilation(sys tsc.System, commandLine *tsoptions.ParsedCommandLine, testing tsc.CommandLineTesting) tsc.CommandLineResult {
+func tscCompilation(ctx context.Context, sys tsc.System, commandLine *tsoptions.ParsedCommandLine, testing tsc.CommandLineTesting) tsc.CommandLineResult {
 	configFileName := ""
 	locale := commandLine.Locale()
 	reportDiagnostic := tsc.CreateDiagnosticReporter(sys, sys.Writer(), locale, commandLine.CompilerOptions())
@@ -150,19 +177,24 @@ func tscCompilation(sys tsc.System, commandLine *tsoptions.ParsedCommandLine, te
 				return tsc.CommandLineResult{Status: tsc.ExitStatusDiagnosticsPresent_OutputsSkipped}
 			}
 		}
-	} else if len(commandLine.FileNames()) == 0 {
+	} else if !commandLine.CompilerOptions().IgnoreConfig.IsTrue() || len(commandLine.FileNames()) == 0 {
 		searchPath := tspath.NormalizePath(sys.GetCurrentDirectory())
 		configFileName = findConfigFile(searchPath, sys.FS().FileExists, "tsconfig.json")
-	}
-
-	if configFileName == "" && len(commandLine.FileNames()) == 0 {
-		if commandLine.CompilerOptions().ShowConfig.IsTrue() {
-			reportDiagnostic(ast.NewCompilerDiagnostic(diagnostics.Cannot_find_a_tsconfig_json_file_at_the_current_directory_Colon_0, tspath.NormalizePath(sys.GetCurrentDirectory())))
-		} else {
-			tsc.PrintVersion(sys, locale)
-			tsc.PrintHelp(sys, locale, commandLine)
+		if len(commandLine.FileNames()) != 0 {
+			if configFileName != "" {
+				// Error to not specify config file
+				reportDiagnostic(ast.NewCompilerDiagnostic(diagnostics.X_tsconfig_json_is_present_but_will_not_be_loaded_if_files_are_specified_on_commandline_Use_ignoreConfig_to_skip_this_error))
+				return tsc.CommandLineResult{Status: tsc.ExitStatusDiagnosticsPresent_OutputsSkipped}
+			}
+		} else if configFileName == "" {
+			if commandLine.CompilerOptions().ShowConfig.IsTrue() {
+				reportDiagnostic(ast.NewCompilerDiagnostic(diagnostics.Cannot_find_a_tsconfig_json_file_at_the_current_directory_Colon_0, tspath.NormalizePath(sys.GetCurrentDirectory())))
+			} else {
+				tsc.PrintVersion(sys, locale)
+				tsc.PrintHelp(sys, locale, commandLine)
+			}
+			return tsc.CommandLineResult{Status: tsc.ExitStatusDiagnosticsPresent_OutputsSkipped}
 		}
-		return tsc.CommandLineResult{Status: tsc.ExitStatusDiagnosticsPresent_OutputsSkipped}
 	}
 
 	// !!! convert to options with absolute paths is usually done here, but for ease of implementation, it's done in `tsoptions.ParseCommandLine()`
@@ -170,9 +202,16 @@ func tscCompilation(sys tsc.System, commandLine *tsoptions.ParsedCommandLine, te
 	configForCompilation := commandLine
 	extendedConfigCache := &tsc.ExtendedConfigCache{}
 	var compileTimes tsc.CompileTimes
+	var commandLineRaw *collections.OrderedMap[string, any]
 	if configFileName != "" {
 		configStart := sys.Now()
-		configParseResult, errors := tsoptions.GetParsedCommandLineOfConfigFile(configFileName, compilerOptionsFromCommandLine, sys, extendedConfigCache)
+		if raw, ok := commandLine.Raw.(*collections.OrderedMap[string, any]); ok {
+			// Wrap command line options in a "compilerOptions" key to match tsconfig.json structure
+			wrapped := &collections.OrderedMap[string, any]{}
+			wrapped.Set("compilerOptions", raw)
+			commandLineRaw = wrapped
+		}
+		configParseResult, errors := tsoptions.GetParsedCommandLineOfConfigFile(configFileName, compilerOptionsFromCommandLine, commandLineRaw, sys, extendedConfigCache)
 		compileTimes.ConfigTime = sys.Now().Sub(configStart)
 		if len(errors) != 0 {
 			// these are unrecoverable errors--exit to report them as diagnostics
@@ -188,7 +227,7 @@ func tscCompilation(sys tsc.System, commandLine *tsoptions.ParsedCommandLine, te
 
 	reportErrorSummary := tsc.CreateReportErrorSummary(sys, locale, configForCompilation.CompilerOptions())
 	if compilerOptionsFromCommandLine.ShowConfig.IsTrue() {
-		showConfig(sys, configForCompilation.CompilerOptions())
+		showConfig(sys, configForCompilation, configFileName)
 		return tsc.CommandLineResult{Status: tsc.ExitStatusSuccess}
 	}
 	if configForCompilation.CompilerOptions().Watch.IsTrue() {
@@ -196,14 +235,16 @@ func tscCompilation(sys tsc.System, commandLine *tsoptions.ParsedCommandLine, te
 			sys,
 			configForCompilation,
 			compilerOptionsFromCommandLine,
+			commandLineRaw,
 			reportDiagnostic,
 			reportErrorSummary,
 			testing,
 		)
-		watcher.start()
+		watcher.start(ctx)
 		return tsc.CommandLineResult{Status: tsc.ExitStatusSuccess, Watcher: watcher}
 	} else if configForCompilation.CompilerOptions().IsIncremental() {
 		return performIncrementalCompilation(
+			ctx,
 			sys,
 			configForCompilation,
 			reportDiagnostic,
@@ -214,6 +255,7 @@ func tscCompilation(sys tsc.System, commandLine *tsoptions.ParsedCommandLine, te
 		)
 	}
 	return performCompilation(
+		ctx,
 		sys,
 		configForCompilation,
 		reportDiagnostic,
@@ -243,6 +285,7 @@ func getTraceFromSys(sys tsc.System, locale locale.Locale, testing tsc.CommandLi
 }
 
 func performIncrementalCompilation(
+	ctx context.Context,
 	sys tsc.System,
 	config *tsoptions.ParsedCommandLine,
 	reportDiagnostic tsc.DiagnosticReporter,
@@ -251,21 +294,31 @@ func performIncrementalCompilation(
 	compileTimes *tsc.CompileTimes,
 	testing tsc.CommandLineTesting,
 ) tsc.CommandLineResult {
-	host := compiler.NewCachedFSCompilerHost(sys.GetCurrentDirectory(), sys.FS(), sys.DefaultLibraryPath(), extendedConfigCache, getTraceFromSys(sys, config.Locale(), testing))
+	contentMapperHost := tsc.NewContentMapperHost(ctx, sys, config.CompilerOptions())
+	contentMapperProject := getContentMapperProject(contentMapperHost, config)
+	if contentMapperProject != nil {
+		defer contentMapperProject.Close()
+	}
+	host := compiler.NewCachedFSCompilerHost(sys.GetCurrentDirectory(), sys.FS(), sys.DefaultLibraryPath(), extendedConfigCache, getTraceFromSys(sys, config.Locale(), testing), contentMapperProject)
 	buildInfoReadStart := sys.Now()
 	oldProgram := incremental.ReadBuildInfoProgram(config, incremental.NewBuildInfoReader(host), host)
 	compileTimes.BuildInfoReadTime = sys.Now().Sub(buildInfoReadStart)
-	// todo: cache, statistics, tracing
+
+	tr := startTracingIfNeeded(sys, config, testing)
+
 	parseStart := sys.Now()
 	program := compiler.NewProgram(compiler.ProgramOptions{
-		Config:           config,
-		Host:             host,
-		JSDocParsingMode: ast.JSDocParsingModeParseForTypeErrors,
+		Config:  config,
+		Host:    host,
+		Tracing: tr,
 	})
 	compileTimes.ParseTime = sys.Now().Sub(parseStart)
 	changesComputeStart := sys.Now()
-	incrementalProgram := incremental.NewProgram(program, oldProgram, incremental.CreateHost(host), testing != nil)
+	incrementalProgram := incremental.NewProgram(program, oldProgram, incremental.CreateHost(host), sys.Now, testing != nil)
 	compileTimes.ChangesComputeTime = sys.Now().Sub(changesComputeStart)
+	if contentMapperHost != nil {
+		compileTimes.ContentMapperTimes = contentMapperHost.Timings()
+	}
 	result, _ := tsc.EmitAndReportStatistics(tsc.EmitInput{
 		Sys:                sys,
 		ProgramLike:        incrementalProgram,
@@ -276,7 +329,11 @@ func performIncrementalCompilation(
 		Writer:             sys.Writer(),
 		CompileTimes:       compileTimes,
 		Testing:            testing,
+		Tracing:            tr,
 	})
+
+	stopTracing(sys, tr)
+
 	if testing != nil {
 		testing.OnProgram(incrementalProgram)
 	}
@@ -286,6 +343,7 @@ func performIncrementalCompilation(
 }
 
 func performCompilation(
+	ctx context.Context,
 	sys tsc.System,
 	config *tsoptions.ParsedCommandLine,
 	reportDiagnostic tsc.DiagnosticReporter,
@@ -294,15 +352,25 @@ func performCompilation(
 	compileTimes *tsc.CompileTimes,
 	testing tsc.CommandLineTesting,
 ) tsc.CommandLineResult {
-	host := compiler.NewCachedFSCompilerHost(sys.GetCurrentDirectory(), sys.FS(), sys.DefaultLibraryPath(), extendedConfigCache, getTraceFromSys(sys, config.Locale(), testing))
-	// todo: cache, statistics, tracing
+	contentMapperHost := tsc.NewContentMapperHost(ctx, sys, config.CompilerOptions())
+	contentMapperProject := getContentMapperProject(contentMapperHost, config)
+	if contentMapperProject != nil {
+		defer contentMapperProject.Close()
+	}
+	host := compiler.NewCachedFSCompilerHost(sys.GetCurrentDirectory(), sys.FS(), sys.DefaultLibraryPath(), extendedConfigCache, getTraceFromSys(sys, config.Locale(), testing), contentMapperProject)
+
+	tr := startTracingIfNeeded(sys, config, testing)
+
 	parseStart := sys.Now()
 	program := compiler.NewProgram(compiler.ProgramOptions{
-		Config:           config,
-		Host:             host,
-		JSDocParsingMode: ast.JSDocParsingModeParseForTypeErrors,
+		Config:  config,
+		Host:    host,
+		Tracing: tr,
 	})
 	compileTimes.ParseTime = sys.Now().Sub(parseStart)
+	if contentMapperHost != nil {
+		compileTimes.ContentMapperTimes = contentMapperHost.Timings()
+	}
 	result, _ := tsc.EmitAndReportStatistics(tsc.EmitInput{
 		Sys:                sys,
 		ProgramLike:        program,
@@ -313,13 +381,28 @@ func performCompilation(
 		Writer:             sys.Writer(),
 		CompileTimes:       compileTimes,
 		Testing:            testing,
+		Tracing:            tr,
 	})
+
+	stopTracing(sys, tr)
+
 	return tsc.CommandLineResult{
 		Status: result.Status,
 	}
 }
 
-func showConfig(sys tsc.System, config *core.CompilerOptions) {
-	// !!!
-	_ = jsonutil.MarshalIndentWrite(sys.Writer(), config, "", "    ")
+func getContentMapperProject(host contentmapper.Host, config *tsoptions.ParsedCommandLine) contentmapper.Project {
+	if host == nil || len(config.ContentMappers()) == 0 {
+		return nil
+	}
+	return host.Project(contentmapper.ProjectSpec{
+		ConfigFileName:  config.ConfigName(),
+		Mappers:         config.ContentMappers(),
+		CompilerOptions: config.CompilerOptions(),
+	})
+}
+
+func showConfig(sys tsc.System, config *tsoptions.ParsedCommandLine, configFileName string) {
+	tsConfig := tsoptions.ConvertToTSConfig(config, configFileName)
+	_ = json.MarshalIndentWrite(sys.Writer(), tsConfig, "", "    ")
 }

@@ -10,20 +10,25 @@ import (
 	"github.com/microsoft/typescript-go/internal/astnav"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/format"
+	"github.com/microsoft/typescript-go/internal/ls/lsconv"
 	"github.com/microsoft/typescript-go/internal/ls/lsutil"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/parser"
 	"github.com/microsoft/typescript-go/internal/printer"
 	"github.com/microsoft/typescript-go/internal/scanner"
+	"github.com/microsoft/typescript-go/internal/spanmap"
 	"github.com/microsoft/typescript-go/internal/stringutil"
 )
 
 func (t *Tracker) getTextChangesFromChanges() map[string][]*lsproto.TextEdit {
 	changes := map[string][]*lsproto.TextEdit{}
 	for sourceFile, changesInFile := range t.changes.M {
+		if t.unmappableFiles.Has(sourceFile.OriginalFileName()) {
+			continue
+		}
 		// order changes by start position
 		// If the start position is the same, put the shorter range first, since an empty range (x, x) may precede (x, y) but not vice-versa.
-		slices.SortStableFunc(changesInFile, func(a, b *trackerEdit) int { return lsproto.CompareRanges(ptrTo(a.Range), ptrTo(b.Range)) })
+		slices.SortStableFunc(changesInFile, func(a, b *trackerEdit) int { return lsproto.CompareRanges(a.Range, b.Range) })
 		// verify that change intervals do not overlap, except possibly at end points.
 		for i := range len(changesInFile) - 1 {
 			if lsproto.ComparePositions(changesInFile[i].Range.End, changesInFile[i+1].Range.Start) > 0 {
@@ -48,7 +53,11 @@ func (t *Tracker) getTextChangesFromChanges() map[string][]*lsproto.TextEdit {
 		})
 
 		if len(textChanges) > 0 {
-			changes[sourceFile.FileName()] = textChanges
+			fileName := sourceFile.OriginalFileName()
+			if t.unmappableFiles.Has(fileName) {
+				continue
+			}
+			changes[fileName] = append(changes[fileName], textChanges...)
 		}
 	}
 	return changes
@@ -62,42 +71,62 @@ func (t *Tracker) computeNewText(change *trackerEdit, targetSourceFile *ast.Sour
 		return change.NewText
 	}
 
-	pos := int(t.converters.LineAndCharacterToPosition(sourceFile, change.Range.Start))
-	formatNode := func(n *ast.Node) string {
-		return t.getFormattedTextOfNode(n, targetSourceFile, sourceFile, pos, change.options)
-	}
-
-	var text string
-	switch change.kind {
-
-	case trackerEditKindReplaceWithMultipleNodes:
-		if change.options.joiner == "" {
-			change.options.joiner = t.newLine
+	positions := lsconv.FromLSPPositionForSourceFile(t.converters, sourceFile, change.Range.Start, spanmap.FeatureAll)
+	var result string
+	found := false
+	// The original range may have multiple verbatim copies; it is safe to lose their identity only when
+	// formatting at every exact projection produces the same edit.
+	for _, mapped := range positions {
+		if !mapped.Fidelity.IsExact() {
+			continue
 		}
-		text = strings.Join(core.Map(change.nodes, func(n *ast.Node) string { return strings.TrimSuffix(formatNode(n), t.newLine) }), change.options.joiner)
-	case trackerEditKindReplaceWithSingleNode:
-		text = formatNode(change.Node)
-	default:
-		panic(fmt.Sprintf("change kind %d should have been handled earlier", change.kind))
+		projection := mapped.Script
+		pos := int(mapped.Position)
+		formatNode := func(n *ast.Node) string {
+			return t.getFormattedTextOfNode(n, targetSourceFile, projection, pos, change.options)
+		}
+
+		var text string
+		switch change.kind {
+		case trackerEditKindReplaceWithMultipleNodes:
+			joiner := change.options.joiner
+			if joiner == "" {
+				joiner = t.newLine
+			}
+			text = strings.Join(core.Map(change.nodes, func(n *ast.Node) string { return strings.TrimSuffix(formatNode(n), t.newLine) }), joiner)
+		case trackerEditKindReplaceWithSingleNode:
+			text = formatNode(change.Node)
+		default:
+			panic(fmt.Sprintf("change kind %d should have been handled earlier", change.kind))
+		}
+		// Strip initial indentation if text will be inserted in the middle of the line.
+		noIndent := text
+		if !(change.options.indentation != nil || format.GetLineStartPositionForPosition(pos, projection) == pos) {
+			noIndent = strings.TrimLeftFunc(text, unicode.IsSpace)
+		}
+		candidate := change.options.Prefix + noIndent + core.IfElse(strings.HasSuffix(noIndent, change.options.Suffix), "", change.options.Suffix)
+		if found && candidate != result {
+			t.unmappableFiles.Add(sourceFile.OriginalFileName())
+			return ""
+		}
+		result = candidate
+		found = true
 	}
-	// strip initial indentation (spaces or tabs) if text will be inserted in the middle of the line
-	noIndent := text
-	if !(change.options.indentation != nil && *change.options.indentation != 0 || format.GetLineStartPositionForPosition(pos, targetSourceFile) == pos) {
-		noIndent = strings.TrimLeftFunc(text, unicode.IsSpace)
+	if !found {
+		t.unmappableFiles.Add(sourceFile.OriginalFileName())
 	}
-	return change.options.Prefix + noIndent + core.IfElse(strings.HasSuffix(noIndent, change.options.Suffix), "", change.options.Suffix)
+	return result
 }
 
 /** Note: this may mutate `nodeIn`. */
 func (t *Tracker) getFormattedTextOfNode(nodeIn *ast.Node, targetSourceFile *ast.SourceFile, sourceFile *ast.SourceFile, pos int, options NodeOptions) string {
 	text, sourceFileLike := t.getNonformattedText(nodeIn, targetSourceFile)
 	// !!! if (validate) validate(node, text);
-	formatOptions := getFormatCodeSettingsForWriting(t.formatSettings, targetSourceFile)
+	formatOptions := GetFormatCodeSettingsForWriting(t.formatSettings, targetSourceFile)
 
 	var initialIndentation, delta int
 	if options.indentation == nil {
-		// !!! indentation for position
-		// initialIndentation = format.GetIndentationForPos(pos, sourceFile, formatOptions, options.prefix == ct.newLine || scanner.GetLineStartPositionForPosition(pos, targetFileLineMap) == pos);
+		initialIndentation = format.GetIndentation(pos, sourceFile, formatOptions, options.Prefix == t.newLine || format.GetLineStartPositionForPosition(pos, sourceFile) == pos)
 	} else {
 		initialIndentation = *options.indentation
 	}
@@ -112,68 +141,31 @@ func (t *Tracker) getFormattedTextOfNode(nodeIn *ast.Node, targetSourceFile *ast
 	return core.ApplyBulkEdits(text, changes)
 }
 
-func getFormatCodeSettingsForWriting(options *format.FormatCodeSettings, sourceFile *ast.SourceFile) *format.FormatCodeSettings {
-	shouldAutoDetectSemicolonPreference := options.Semicolons == format.SemicolonPreferenceIgnore
-	shouldRemoveSemicolons := options.Semicolons == format.SemicolonPreferenceRemove || shouldAutoDetectSemicolonPreference && !lsutil.ProbablyUsesSemicolons(sourceFile)
+func GetFormatCodeSettingsForWriting(options lsutil.FormatCodeSettings, sourceFile *ast.SourceFile) lsutil.FormatCodeSettings {
+	shouldAutoDetectSemicolonPreference := options.Semicolons == lsutil.SemicolonPreferenceIgnore
+	shouldRemoveSemicolons := options.Semicolons == lsutil.SemicolonPreferenceRemove || shouldAutoDetectSemicolonPreference && !lsutil.ProbablyUsesSemicolons(sourceFile)
 	if shouldRemoveSemicolons {
-		options.Semicolons = format.SemicolonPreferenceRemove
+		options.Semicolons = lsutil.SemicolonPreferenceRemove
 	}
 
 	return options
 }
 
 func (t *Tracker) getNonformattedText(node *ast.Node, sourceFile *ast.SourceFile) (string, *ast.Node) {
-	nodeIn := node
-	eofToken := t.Factory.NewToken(ast.KindEndOfFile)
-	if ast.IsStatement(node) {
-		nodeIn = t.Factory.NewSourceFile(
-			ast.SourceFileParseOptions{FileName: sourceFile.FileName(), Path: sourceFile.Path()},
-			"",
-			t.Factory.NewNodeList([]*ast.Node{node}),
-			t.Factory.NewToken(ast.KindEndOfFile),
-		)
-	}
-	writer := printer.NewChangeTrackerWriter(t.newLine)
-	printer.NewPrinter(
-		printer.PrinterOptions{
-			NewLine:                       core.GetNewLineKind(t.newLine),
-			NeverAsciiEscape:              true,
-			PreserveSourceNewlines:        true,
-			TerminateUnterminatedLiterals: true,
-		},
-		writer.GetPrintHandlers(),
-		t.EmitContext,
-	).Write(nodeIn, sourceFile, writer, nil)
-
-	text := writer.String()
-	text = strings.TrimSuffix(text, t.newLine) // Newline artifact from printing a SourceFile instead of a node
-
-	nodeOut := writer.AssignPositionsToNode(nodeIn, t.NodeFactory)
-	var sourceFileLike *ast.Node
-	if !ast.IsStatement(node) {
-		nodeList := t.Factory.NewNodeList([]*ast.Node{nodeOut})
-		nodeList.Loc = nodeOut.Loc
-		eofToken.Loc = core.NewTextRange(nodeOut.End(), nodeOut.End())
-		sourceFileLike = t.Factory.NewSourceFile(
-			ast.SourceFileParseOptions{FileName: sourceFile.FileName(), Path: sourceFile.Path()},
-			text,
-			nodeList,
-			eofToken,
-		)
-		sourceFileLike.ForEachChild(func(child *ast.Node) bool {
-			child.Parent = sourceFileLike
-			return true
-		})
-		sourceFileLike.Loc = nodeOut.Loc
-	} else {
-		sourceFileLike = nodeOut
-	}
-	return text, sourceFileLike
+	text, nodeOut := printer.PrintAndPositionNode(t.NodeFactory, node, sourceFile, t.newLine, t.formatSettings.IndentSize, t.EmitContext)
+	sourceFileLike := printer.CreateSyntheticSourceFile(
+		t.NodeFactory,
+		nodeOut,
+		text,
+		ast.SourceFileParseOptions{FileName: sourceFile.FileName(), Path: sourceFile.Path()},
+	)
+	return text, sourceFileLike.AsNode()
 }
 
 // method on the changeTracker because use of converters
-func (t *Tracker) getAdjustedRange(sourceFile *ast.SourceFile, startNode *ast.Node, endNode *ast.Node, leadingOption LeadingTriviaOption, trailingOption TrailingTriviaOption) lsproto.Range {
-	return t.converters.ToLSPRange(
+// GetAdjustedRange computes the adjusted range for a node in a source file, accounting for trivia.
+func (t *Tracker) GetAdjustedRange(sourceFile *ast.SourceFile, startNode *ast.Node, endNode *ast.Node, leadingOption LeadingTriviaOption, trailingOption TrailingTriviaOption) lsproto.Range {
+	return t.toLSPEditRange(
 		sourceFile,
 		core.NewTextRange(
 			t.getAdjustedStartPosition(sourceFile, startNode, leadingOption, false),
@@ -256,7 +248,7 @@ func (t *Tracker) getEndPositionOfMultilineTrailingComment(sourceFile *ast.Sourc
 		nodeEndLine := scanner.ComputeLineOfPosition(lineStarts, node.End())
 		for comment := range scanner.GetTrailingCommentRanges(t.NodeFactory, sourceFile.Text(), node.End()) {
 			// Single line can break the loop as trivia will only be this line.
-			// Comments on subsequest lines are also ignored.
+			// Comments on subsequent lines are also ignored.
 			if comment.Kind == ast.KindSingleLineCommentTrivia || scanner.ComputeLineOfPosition(lineStarts, comment.Pos()) > nodeEndLine {
 				break
 			}

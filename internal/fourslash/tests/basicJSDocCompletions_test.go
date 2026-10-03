@@ -53,7 +53,8 @@ function baz(x = 0) {
   return x * 2;
 }
 `
-	f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
 	f.VerifyCompletions(t, "1", &fourslash.CompletionsExpectedList{
 		IsIncomplete: false,
 		ItemDefaults: &fourslash.CompletionsExpectedItemDefaults{
@@ -63,8 +64,8 @@ function baz(x = 0) {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:  "link",
-					Kind:   PtrTo(lsproto.CompletionItemKindKeyword),
-					Detail: PtrTo("link"),
+					Kind:   new(lsproto.CompletionItemKindKeyword),
+					Detail: new("link"),
 				},
 				"param",
 				"returns",

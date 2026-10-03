@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/fourslash"
-	. "github.com/microsoft/typescript-go/internal/fourslash/tests/util"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/testutil"
 )
@@ -22,22 +21,23 @@ foo((/*1*/
 /** This is a JSDoc comment */
 foo/** More comments*/((/*2*/
 `
-	f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
-	f.VerifySignatureHelp(t, &fourslash.SignatureHelpCase{
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
+	f.VerifySignatureHelpWithCases(t, &fourslash.SignatureHelpCase{
 		MarkerInput: "1",
 		Expected:    nil,
 		Context: &lsproto.SignatureHelpContext{
 			IsRetrigger:      false,
-			TriggerCharacter: PtrTo("("),
+			TriggerCharacter: new("("),
 			TriggerKind:      lsproto.SignatureHelpTriggerKindTriggerCharacter,
 		},
 	})
-	f.VerifySignatureHelp(t, &fourslash.SignatureHelpCase{
+	f.VerifySignatureHelpWithCases(t, &fourslash.SignatureHelpCase{
 		MarkerInput: "2",
 		Expected:    nil,
 		Context: &lsproto.SignatureHelpContext{
 			IsRetrigger:      false,
-			TriggerCharacter: PtrTo("("),
+			TriggerCharacter: new("("),
 			TriggerKind:      lsproto.SignatureHelpTriggerKindTriggerCharacter,
 		},
 	})

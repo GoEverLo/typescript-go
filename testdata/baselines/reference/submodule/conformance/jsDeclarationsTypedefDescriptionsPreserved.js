@@ -19,6 +19,7 @@
 
 
 //// [index.js]
+"use strict";
 /**
  * Options for Foo <------------
  * @typedef {Object} FooOptions
@@ -43,11 +44,23 @@
  * @property {string} baz - Sylvester McMonkey McBean
  */
 type FooOptions = {
+    /**
+     * - Marvin K Mooney
+     */
     bar: boolean;
+    /**
+     * - Sylvester McMonkey McBean
+     */
     baz: string;
 };
 type BarOptions = {
+    /**
+     * - Marvin K Mooney
+     */
     bar: boolean;
+    /**
+     * - Sylvester McMonkey McBean
+     */
     baz: string;
 };
 /**

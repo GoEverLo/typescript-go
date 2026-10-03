@@ -1,8 +1,8 @@
 package incremental
 
 import (
-	"github.com/go-json-experiment/json"
 	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/json"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 )
 
@@ -45,6 +45,12 @@ func ReadBuildInfoProgram(config *tsoptions.ParsedCommandLine, reader BuildInfoR
 	// Read buildInfo file
 	buildInfo := reader.ReadBuildInfo(config)
 	if buildInfo == nil || !buildInfo.IsValidVersion() || !buildInfo.IsIncremental() {
+		return nil
+	}
+	// If any configured content mapper's identity has changed, files it produced may be stale, so the
+	// old program cannot be reused.
+	contentMapperIdentities, err := ContentMapperIdentities(host.ContentMapperProject())
+	if err != nil || !buildInfo.ContentMapperIdentitiesMatch(contentMapperIdentities) {
 		return nil
 	}
 

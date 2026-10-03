@@ -62,6 +62,7 @@ Object.defineProperty(module.exports, "j", { value: function j() {} });
 
 
 //// [index.js]
+"use strict";
 Object.defineProperty(module.exports, "a", { value: function a() { } });
 Object.defineProperty(module.exports, "b", { value: function b() { } });
 Object.defineProperty(module.exports.b, "cat", { value: "cat" });
@@ -70,7 +71,7 @@ Object.defineProperty(module.exports.b, "cat", { value: "cat" });
  * @param {number} b
  * @return {string}
  */
-function d(a, b) { return /** @type {*} */ null; }
+function d(a, b) { return /** @type {*} */ (null); }
 Object.defineProperty(module.exports, "d", { value: d });
 /**
  * @template T,U
@@ -78,7 +79,7 @@ Object.defineProperty(module.exports, "d", { value: d });
  * @param {U} b
  * @return {T & U}
  */
-function e(a, b) { return /** @type {*} */ null; }
+function e(a, b) { return /** @type {*} */ (null); }
 Object.defineProperty(module.exports, "e", { value: e });
 /**
  * @template T
@@ -113,6 +114,21 @@ Object.defineProperty(module.exports, "j", { value: function j() { } });
 
 
 //// [index.d.ts]
+export declare var a: () => void;
+export declare var b: () => void;
+declare const _exported: typeof d;
+export { _exported as d };
+declare const _exported_1: typeof e;
+export { _exported_1 as e };
+declare const _exported_2: typeof f;
+export { _exported_2 as f };
+declare const _exported_3: typeof g;
+export { _exported_3 as g };
+export declare var h: typeof hh;
+export declare var i: () => void;
+export declare var ii: () => void;
+export declare var jj: () => void;
+export declare var j: () => void;
 /**
  * @param {number} a
  * @param {number} b
@@ -138,8 +154,8 @@ declare function f<T>(a: T): T;
 declare function g(a: {
     x: string;
 }, b: {
-    y: typeof module.exports.b;
-}): any;
+    y: () => void;
+}): void | "";
 /**
  * @param {{x: string}} a
  * @param {{y: typeof module.exports.b}} b
@@ -147,5 +163,5 @@ declare function g(a: {
 declare function hh(a: {
     x: string;
 }, b: {
-    y: typeof module.exports.b;
-}): any;
+    y: () => void;
+}): void | "";

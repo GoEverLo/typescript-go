@@ -20,6 +20,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/bundled"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/contentmapper"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/diagnostics"
 	"github.com/microsoft/typescript-go/internal/execute/incremental"
@@ -29,6 +30,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/repo"
 	"github.com/microsoft/typescript-go/internal/sourcemap"
 	"github.com/microsoft/typescript-go/internal/testutil"
+	"github.com/microsoft/typescript-go/internal/testutil/contentmappertest"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
 	"github.com/microsoft/typescript-go/internal/vfs"
@@ -104,7 +106,7 @@ func CompileFiles(
 
 	// Parse harness and compiler options from the test configuration
 	if testConfig != nil {
-		setOptionsFromTestConfig(t, testConfig, compilerOptions, &harnessOptions, currentDirectory)
+		SetOptionsFromTestConfig(t, testConfig, compilerOptions, &harnessOptions, currentDirectory, false /*allowUnknownOptions*/)
 	}
 
 	return CompileFilesEx(t, inputFiles, otherFiles, &harnessOptions, compilerOptions, currentDirectory, symlinks, tsconfig)
@@ -124,7 +126,8 @@ func CompileFilesEx(
 	for _, file := range inputFiles {
 		fileName := tspath.GetNormalizedAbsolutePath(file.UnitName, currentDirectory)
 
-		if !tspath.FileExtensionIs(fileName, tspath.ExtensionJson) {
+		if !tspath.FileExtensionIs(fileName, tspath.ExtensionJson) &&
+			!tspath.FileExtensionIs(fileName, tspath.ExtensionTsBuildInfo) {
 			programFileNames = append(programFileNames, fileName)
 		}
 	}
@@ -183,6 +186,11 @@ func CompileFilesEx(
 		compilerOptions.TypeRoots[i] = tspath.GetNormalizedAbsolutePath(typeRoot, currentDirectory)
 	}
 
+	var contentMappers []*contentmapper.Mapper
+	if tsconfig != nil && tsconfig.ParsedConfig != nil {
+		contentMappers = tsconfig.ParsedConfig.ContentMappers
+	}
+
 	// Create fake FS for testing
 	testfs := map[string]any{}
 	for _, file := range inputFiles {
@@ -211,27 +219,46 @@ func CompileFilesEx(
 	fs = bundled.WrapFS(fs)
 	fs = NewOutputRecorderFS(fs)
 
-	host := createCompilerHost(fs, bundled.LibPath(), currentDirectory)
+	// Content mappers, when trusted, are served in-process by the test mapper (see contentmappertest).
+	// The host is shared by the pre- and post-emit programs and torn down when this compilation finishes.
+	var contentMapperHost contentmapper.Host
+	if compilerOptions.RunExternalCode.IsTrue() && len(contentMappers) > 0 {
+		contentMapperHost = contentmapper.NewHost(context.Background(), contentmappertest.NewSpawner(), locale.Default)
+		defer contentMapperHost.Close()
+	}
+
 	var configFile *tsoptions.TsConfigSourceFile
 	var errors []*ast.Diagnostic
 	if tsconfig != nil {
 		configFile = tsconfig.ConfigFile
 		errors = tsconfig.Errors
 	}
-	result := compileFilesWithHost(host, &tsoptions.ParsedCommandLine{
-		ParsedConfig: &core.ParsedOptions{
+	config := &tsoptions.ParsedCommandLine{
+		ParsedConfig: &tsoptions.ParsedOptions{
 			CompilerOptions: compilerOptions,
 			FileNames:       programFileNames,
+			ContentMappers:  contentMappers,
 		},
 		ConfigFile: configFile,
 		Errors:     errors,
-	}, harnessOptions)
+	}
+	var contentMapperProject contentmapper.Project
+	if contentMapperHost != nil {
+		contentMapperProject = contentMapperHost.Project(contentmapper.ProjectSpec{
+			ConfigFileName:  config.ConfigName(),
+			Mappers:         config.ContentMappers(),
+			CompilerOptions: config.CompilerOptions(),
+		})
+		defer contentMapperProject.Close()
+	}
+	host := createCompilerHost(fs, bundled.LibPath(), currentDirectory, contentMapperProject)
+	result := compileFilesWithHost(host, config, harnessOptions)
 	result.Symlinks = symlinks
 	result.Trace = host.tracer.String()
 	result.Repeat = func(testConfig TestConfiguration) *CompilationResult {
 		newHarnessOptions := *harnessOptions
 		newCompilerOptions := compilerOptions.Clone()
-		setOptionsFromTestConfig(t, testConfig, newCompilerOptions, &newHarnessOptions, currentDirectory)
+		SetOptionsFromTestConfig(t, testConfig, newCompilerOptions, &newHarnessOptions, currentDirectory, false /*allowUnknownOptions*/)
 		return CompileFilesEx(t, inputFiles, otherFiles, &newHarnessOptions, newCompilerOptions, currentDirectory, symlinks, tsconfig)
 	}
 	return result
@@ -239,7 +266,7 @@ func CompileFilesEx(
 
 var testLibFolderMap = sync.OnceValue(func() map[string]any {
 	testfs := make(map[string]any)
-	libfs := os.DirFS(filepath.Join(repo.TypeScriptSubmodulePath, "tests", "lib"))
+	libfs := os.DirFS(filepath.Join(repo.TypeScriptSubmodulePath(), "tests", "lib"))
 	err := fs.WalkDir(libfs, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -262,24 +289,7 @@ var testLibFolderMap = sync.OnceValue(func() map[string]any {
 	return testfs
 })
 
-func SetCompilerOptionsFromTestConfig(t *testing.T, testConfig TestConfiguration, compilerOptions *core.CompilerOptions, currentDirectory string) {
-	for name, value := range testConfig {
-		if name == "typescriptversion" {
-			continue
-		}
-
-		commandLineOption := getCommandLineOption(name)
-		if commandLineOption != nil {
-			parsedValue := getOptionValue(t, commandLineOption, value, currentDirectory)
-			errors := tsoptions.ParseCompilerOptions(commandLineOption.Name, parsedValue, compilerOptions)
-			if len(errors) > 0 {
-				t.Fatalf("Error parsing value '%s' for compiler option '%s'.", value, commandLineOption.Name)
-			}
-		}
-	}
-}
-
-func setOptionsFromTestConfig(t *testing.T, testConfig TestConfiguration, compilerOptions *core.CompilerOptions, harnessOptions *HarnessOptions, currentDirectory string) {
+func SetOptionsFromTestConfig(t *testing.T, testConfig TestConfiguration, compilerOptions *core.CompilerOptions, harnessOptions *HarnessOptions, currentDirectory string, allowUnknownOptions bool) {
 	for name, value := range testConfig {
 		if name == "typescriptversion" {
 			continue
@@ -300,8 +310,9 @@ func setOptionsFromTestConfig(t *testing.T, testConfig TestConfiguration, compil
 			parseHarnessOption(t, harnessOption.Name, parsedValue, harnessOptions)
 			continue
 		}
-
-		t.Fatalf("Unknown compiler option '%s'.", name)
+		if !allowUnknownOptions {
+			t.Fatalf("Unknown compiler option '%s'.", name)
+		}
 	}
 }
 
@@ -428,8 +439,6 @@ func parseHarnessOption(t *testing.T, key string, value any, harnessOptions *Har
 		t.Fatalf("Unknown harness option '%s'.", key)
 	}
 }
-
-var deprecatedModuleResolution []string = []string{"node", "classic", "node10"}
 
 func getOptionValue(t *testing.T, option *tsoptions.CommandLineOption, value string, cwd string) tsoptions.CompilerOptionsValue {
 	switch option.Kind {
@@ -604,13 +613,13 @@ func (t *TracerForBaselining) Reset() {
 	t.packageJsonCache = make(map[tspath.Path]bool)
 }
 
-func createCompilerHost(fs vfs.FS, defaultLibraryPath string, currentDirectory string) *cachedCompilerHost {
+func createCompilerHost(fs vfs.FS, defaultLibraryPath string, currentDirectory string, contentMapperProject contentmapper.Project) *cachedCompilerHost {
 	tracer := NewTracerForBaselining(tspath.ComparePathsOptions{
 		UseCaseSensitiveFileNames: fs.UseCaseSensitiveFileNames(),
 		CurrentDirectory:          currentDirectory,
 	}, &strings.Builder{})
 	return &cachedCompilerHost{
-		CompilerHost: compiler.NewCompilerHost(currentDirectory, fs, defaultLibraryPath, nil, tracer.Trace),
+		CompilerHost: compiler.NewCompilerHost(currentDirectory, fs, defaultLibraryPath, nil, tracer.Trace, contentMapperProject),
 		tracer:       tracer,
 	}
 }
@@ -635,62 +644,79 @@ func compileFilesWithHost(
 	// 	delete compilerOptions.project;
 	// }
 
-	// !!! Need `getPreEmitDiagnostics` program for this
-	// pre-emit/post-emit error comparison requires declaration emit twice, which can be slow. If it's unlikely to flag any error consistency issues
-	// and if the test is running `skipLibCheck` - an indicator that we want the tets to run quickly - skip the before/after error comparison, too
-	// skipErrorComparison := len(rootFiles) >= 100 || options.SkipLibCheck == core.TSTrue && options.Declaration == core.TSTrue
-	// var preProgram *compiler.Program
-	// if !skipErrorComparison {
-	// preProgram = ts.createProgram({ rootNames: rootFiles || [], options: { ...compilerOptions, configFile: compilerOptions.configFile, traceResolution: false }, host, typeScriptVersion })
-	// }
-	// let preErrors = preProgram && ts.getPreEmitDiagnostics(preProgram);
-	// if (preProgram && harnessOptions.captureSuggestions) {
-	//     preErrors = ts.concatenate(preErrors, ts.flatMap(preProgram.getSourceFiles(), f => preProgram.getSuggestionDiagnostics(f)));
-	// }
-
-	// const program = ts.createProgram({ rootNames: rootFiles || [], options: compilerOptions, host, harnessOptions.typeScriptVersion });
-	// const emitResult = program.emit();
-	// let postErrors = ts.getPreEmitDiagnostics(program);
-	// !!! Need `getSuggestionDiagnostics` for this
-	// if (harnessOptions.captureSuggestions) {
-	//     postErrors = ts.concatenate(postErrors, ts.flatMap(program.getSourceFiles(), f => program.getSuggestionDiagnostics(f)));
-	// }
-	// const longerErrors = ts.length(preErrors) > postErrors.length ? preErrors : postErrors;
-	// const shorterErrors = longerErrors === preErrors ? postErrors : preErrors;
-	// const errors = preErrors && (preErrors.length !== postErrors.length) ? [
-	//     ...shorterErrors!,
-	//     ts.addRelatedInfo(
-	//         ts.createCompilerDiagnostic({
-	//             category: ts.DiagnosticCategory.Error,
-	//             code: -1,
-	//             key: "-1",
-	//             message: `Pre-emit (${preErrors.length}) and post-emit (${postErrors.length}) diagnostic counts do not match! This can indicate that a semantic _error_ was added by the emit resolver - such an error may not be reflected on the command line or in the editor, but may be captured in a baseline here!`,
-	//         }),
-	//         ts.createCompilerDiagnostic({
-	//             category: ts.DiagnosticCategory.Error,
-	//             code: -1,
-	//             key: "-1",
-	//             message: `The excess diagnostics are:`,
-	//         }),
-	//         ...ts.filter(longerErrors!, p => !ts.some(shorterErrors, p2 => ts.compareDiagnostics(p, p2) === ts.Comparison.EqualTo)),
-	//     ),
-	// ] : postErrors;
 	ctx := context.Background()
-	program := createProgram(host, config)
-	var diagnostics []*ast.Diagnostic
-	diagnostics = append(diagnostics, program.GetProgramDiagnostics()...)
-	diagnostics = append(diagnostics, program.GetSyntacticDiagnostics(ctx, nil)...)
-	diagnostics = append(diagnostics, program.GetSemanticDiagnostics(ctx, nil)...)
-	diagnostics = append(diagnostics, program.GetGlobalDiagnostics(ctx)...)
-	if config.CompilerOptions().GetEmitDeclarations() {
-		diagnostics = append(diagnostics, program.GetDeclarationDiagnostics(ctx, nil)...)
+
+	var preErrors []*ast.Diagnostic
+	preCompilerOptions := config.CompilerOptions().Clone()
+	preCompilerOptions.TraceResolution = core.TSFalse
+	preConfig := &tsoptions.ParsedCommandLine{
+		ParsedConfig: &tsoptions.ParsedOptions{
+			CompilerOptions: preCompilerOptions,
+			FileNames:       config.FileNames(),
+			ContentMappers:  config.ContentMappers(),
+		},
+		ConfigFile: config.ConfigFile,
+		Errors:     config.Errors,
+	}
+	preProgram := createProgram(host, preConfig)
+	preErrors = append(preErrors, preProgram.GetConfigFileParsingDiagnostics()...)
+	preErrors = append(preErrors, preProgram.GetProgramDiagnostics()...)
+	preErrors = append(preErrors, preProgram.GetSyntacticDiagnostics(ctx, nil)...)
+	preErrors = append(preErrors, preProgram.GetSemanticDiagnostics(ctx, nil)...)
+	preErrors = append(preErrors, preProgram.GetGlobalDiagnostics(ctx)...)
+	if preProgram.Options().GetEmitDeclarations() {
+		preErrors = append(preErrors, preProgram.GetDeclarationDiagnostics(ctx, nil)...)
 	}
 	if harnessOptions.CaptureSuggestions {
-		diagnostics = append(diagnostics, program.GetSuggestionDiagnostics(ctx, nil)...)
+		preErrors = append(preErrors, preProgram.GetSuggestionDiagnostics(ctx, nil)...)
 	}
-	emitResult := program.Emit(ctx, compiler.EmitOptions{})
+	preErrors = compiler.SortAndDeduplicateDiagnostics(preErrors)
 
-	return newCompilationResult(host, config.CompilerOptions(), program, emitResult, diagnostics, harnessOptions)
+	postProgram := createProgram(host, config)
+	emitResult := postProgram.Emit(ctx, compiler.EmitOptions{})
+	var postErrors []*ast.Diagnostic
+	postErrors = append(postErrors, postProgram.GetConfigFileParsingDiagnostics()...)
+	postErrors = append(postErrors, postProgram.GetProgramDiagnostics()...)
+	postErrors = append(postErrors, postProgram.GetSyntacticDiagnostics(ctx, nil)...)
+	postErrors = append(postErrors, postProgram.GetSemanticDiagnostics(ctx, nil)...)
+	postErrors = append(postErrors, postProgram.GetGlobalDiagnostics(ctx)...)
+	if postProgram.Options().GetEmitDeclarations() {
+		postErrors = append(postErrors, postProgram.GetDeclarationDiagnostics(ctx, nil)...)
+	}
+	if harnessOptions.CaptureSuggestions {
+		postErrors = append(postErrors, postProgram.GetSuggestionDiagnostics(ctx, nil)...)
+	}
+	postErrors = compiler.SortAndDeduplicateDiagnostics(postErrors)
+
+	errors := postErrors
+	if len(postErrors) != len(preErrors) {
+		longerErrors := postErrors
+		shorterErrors := preErrors
+		if len(preErrors) > len(postErrors) {
+			longerErrors, shorterErrors = preErrors, postErrors
+		}
+		diag := ast.NewCompilerDiagnostic(
+			diagnostics.NewAdHocMessage(fmt.Sprintf("Pre-emit (%d) and post-emit (%d) diagnostic counts do not match! This can indicate that a semantic _error_ was added by the emit resolver - such an error may not be reflected on the command line or in the editor, but may be captured in a baseline here!", len(preErrors), len(postErrors))),
+		)
+		diag = diag.AddRelatedInfo(ast.NewCompilerDiagnostic(diagnostics.NewAdHocMessage("The excess diagnostics are:")))
+		for _, d := range longerErrors {
+			matched := false
+			for _, d2 := range shorterErrors {
+				comparison := ast.CompareDiagnostics(d, d2)
+				if comparison == 0 {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				diag = diag.AddRelatedInfo(d)
+			}
+		}
+		errors = shorterErrors
+		errors = append(errors, diag)
+	}
+
+	return newCompilationResult(host, config.CompilerOptions(), postProgram, emitResult, errors, harnessOptions)
 }
 
 type CompilationResult struct {
@@ -829,6 +855,9 @@ func (c *CompilationResult) getOutputPath(path string, ext string) string {
 			path = tspath.CombinePaths(tspath.ResolvePath(c.Host.GetCurrentDirectory(), c.Options.OutDir), path)
 		}
 	}
+	if ext == tspath.GetDeclarationEmitExtensionForPath(path) {
+		return outputpaths.ChangeToDeclarationExtension(path, c.Program.Program())
+	}
 	return tspath.ChangeExtension(path, ext)
 }
 
@@ -952,7 +981,7 @@ func createProgram(host compiler.CompilerHost, config *tsoptions.ParsedCommandLi
 	program := compiler.NewProgram(programOptions)
 	if config.CompilerOptions().Incremental.IsTrue() {
 		oldProgram := incremental.ReadBuildInfoProgram(config, getTestBuildInfoReader(host), host)
-		incrementalProgram := incremental.NewProgram(program, oldProgram, incremental.CreateHost(host), false)
+		incrementalProgram := incremental.NewProgram(program, oldProgram, incremental.CreateHost(host), nil, false)
 		return incrementalProgram
 	}
 	return program
@@ -971,7 +1000,7 @@ func listFiles(path string, spec *regexp.Regexp, recursive bool) ([]string, erro
 }
 
 func listFilesWorker(spec *regexp.Regexp, recursive bool, folder string) ([]string, error) {
-	folder = tspath.GetNormalizedAbsolutePath(folder, repo.TestDataPath)
+	folder = tspath.GetNormalizedAbsolutePath(folder, repo.TestDataPath())
 	entries, err := os.ReadDir(folder)
 	if err != nil {
 		return nil, err
@@ -1103,7 +1132,12 @@ func splitOptionValues(t *testing.T, value string, option string) []string {
 
 	// remove all excluded entries
 	for _, exclude := range excludes {
-		value := getValueOfOptionString(t, option, exclude)
+		value, ok := tryGetValueOfOptionString(option, exclude)
+		if !ok {
+			// The excluded value is not recognized (e.g., a removed option like "es3").
+			// Just skip it since there's nothing to remove.
+			continue
+		}
 		delete(variations, value)
 	}
 
@@ -1114,15 +1148,35 @@ func splitOptionValues(t *testing.T, value string, option string) []string {
 }
 
 func getValueOfOptionString(t *testing.T, option string, value string) tsoptions.CompilerOptionsValue {
+	result, ok := tryGetValueOfOptionString(option, value)
+	if !ok {
+		t.Fatalf("Unknown value '%s' for option '%s'", value, option)
+	}
+	return result
+}
+
+func tryGetValueOfOptionString(option string, value string) (tsoptions.CompilerOptionsValue, bool) {
 	optionDecl := getCommandLineOption(option)
 	if optionDecl == nil {
-		t.Fatalf("Unknown option '%s'", option)
+		return nil, false
 	}
-	// TODO(gabritto): remove this when we deprecate the tests containing those option values
-	if optionDecl.Name == "moduleResolution" && slices.Contains(deprecatedModuleResolution, strings.ToLower(value)) {
-		return value
+	switch optionDecl.Kind {
+	case tsoptions.CommandLineOptionTypeEnum:
+		enumVal, ok := optionDecl.EnumMap().Get(strings.ToLower(value))
+		if !ok {
+			return nil, false
+		}
+		return enumVal, true
+	case tsoptions.CommandLineOptionTypeBoolean:
+		switch strings.ToLower(value) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+		return nil, false
 	}
-	return getOptionValue(t, optionDecl, value, "/")
+	return value, true
 }
 
 func getCommandLineOption(option string) *tsoptions.CommandLineOption {
@@ -1177,4 +1231,35 @@ func GetConfigNameFromFileName(filename string) string {
 		return basenameLower
 	}
 	return ""
+}
+
+func SkipUnsupportedCompilerOptions(t *testing.T, options *core.CompilerOptions) {
+	t.Helper()
+	switch options.Module {
+	case core.ModuleKindAMD, core.ModuleKindUMD, core.ModuleKindSystem:
+		t.Skipf("unsupported module kind %s", options.Module)
+	}
+	switch options.ModuleResolution {
+	case core.ModuleResolutionKindNode10, core.ModuleResolutionKindClassic:
+		t.Skipf("unsupported module resolution kind %d", options.ModuleResolution)
+	}
+	if options.ESModuleInterop.IsFalse() {
+		t.Skipf("esModuleInterop=false is unsupported")
+	}
+	if options.AllowSyntheticDefaultImports.IsFalse() {
+		t.Skipf("allowSyntheticDefaultImports=false is unsupported")
+	}
+	if options.BaseUrl != "" {
+		t.Skipf("unsupported baseUrl %s", options.BaseUrl)
+	}
+	if options.OutFile != "" {
+		t.Skipf("unsupported outFile %s", options.OutFile)
+	}
+	switch options.Target {
+	case core.ScriptTargetES5:
+		t.Skipf("unsupported target %s", options.Target)
+	}
+	if options.AlwaysStrict.IsFalse() {
+		t.Skipf("alwaysStrict=false is unsupported")
+	}
 }

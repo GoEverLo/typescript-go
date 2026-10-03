@@ -1,4 +1,7 @@
 UseCaseSensitiveFileNames: true
+//// [/findAllRefsRootOfReferencedProject.ts] *new* 
+
+
 //// [/src/common/input/keyboard.test.ts] *new* 
 import { evaluateKeyboardEvent } from 'common/input/keyboard';
 function testEvaluateKeyboardEvent() {
@@ -137,7 +140,7 @@ Config File Names::
       "character": 16
     },
     "context": {
-      "includeDeclaration": false
+      "includeDeclaration": true
     }
   }
 }

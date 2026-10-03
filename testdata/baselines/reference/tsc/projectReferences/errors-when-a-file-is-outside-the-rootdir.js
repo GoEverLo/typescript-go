@@ -17,15 +17,20 @@ export { }
 tsgo --p alpha/tsconfig.json
 ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
+[96malpha/src/a.ts[0m:[93m1[0m:[93m20[0m - [91merror[0m[90m TS6059: [0mFile '/home/src/workspaces/project/beta/b.ts' is not under 'rootDir' '/home/src/workspaces/project/alpha'. 'rootDir' is expected to contain all source files.
+
+[7m1[0m import * as b from '../../beta/b'
+[7m [0m [91m                   ~~~~~~~~~~~~~~[0m
+
 [96malpha/src/a.ts[0m:[93m1[0m:[93m20[0m - [91merror[0m[90m TS6307: [0mFile '/home/src/workspaces/project/beta/b.ts' is not listed within the file list of project '/home/src/workspaces/project/alpha/tsconfig.json'. Projects must list all files or use an 'include' pattern.
 
 [7m1[0m import * as b from '../../beta/b'
 [7m [0m [91m                   ~~~~~~~~~~~~~~[0m
 
 
-Found 1 error in alpha/src/a.ts[90m:1[0m
+Found 2 errors in the same file, starting at: alpha/src/a.ts[90m:1[0m
 
-//// [/home/src/tslibs/TS/Lib/lib.d.ts] *Lib*
+//// [/home/src/tslibs/TS/Lib/lib.es2025.full.d.ts] *Lib*
 /// <reference no-default-lib="true"/>
 interface Boolean {}
 interface Function {}
@@ -52,11 +57,10 @@ declare const console: { log(msg: any): void; };
 export {};
 
 //// [/home/src/workspaces/project/alpha/bin/src/a.js] *new* 
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
+export {};
 
 //// [/home/src/workspaces/project/alpha/bin/tsconfig.tsbuildinfo] *new* 
-{"version":"FakeTSVersion","errors":true,"root":[3],"fileNames":["lib.d.ts","../../beta/b.ts","../src/a.ts"],"fileInfos":[{"version":"8859c12c614ce56ba9a18e58384a198f-/// <reference no-default-lib=\"true\"/>\ninterface Boolean {}\ninterface Function {}\ninterface CallableFunction {}\ninterface NewableFunction {}\ninterface IArguments {}\ninterface Number { toExponential: any; }\ninterface Object {}\ninterface RegExp {}\ninterface String { charAt: any; }\ninterface Array<T> { length: number; [n: number]: T; }\ninterface ReadonlyArray<T> {}\ninterface SymbolConstructor {\n    (desc?: string | number): symbol;\n    for(name: string): symbol;\n    readonly toStringTag: symbol;\n}\ndeclare var Symbol: SymbolConstructor;\ninterface Symbol {\n    readonly [Symbol.toStringTag]: string;\n}\ndeclare const console: { log(msg: any): void; };","affectsGlobalScope":true,"impliedNodeFormat":1},{"version":"c7aa180f19a42166d3166e266d7e59ec-export { }","signature":"abe7d9981d6018efb6b2b794f40a1607-export {};\n","impliedNodeFormat":1},{"version":"48cb0b944bf6ab58a2c0fa2f1d92b81b-import * as b from '../../beta/b'","signature":"abe7d9981d6018efb6b2b794f40a1607-export {};\n","impliedNodeFormat":1}],"fileIdsList":[[2]],"options":{"composite":true,"outDir":"./"},"referencedMap":[[3,1]],"latestChangedDtsFile":"./src/a.d.ts"}
+{"version":"FakeTSVersion","errors":true,"root":[3],"fileNames":["lib.es2025.full.d.ts","../../beta/b.ts","../src/a.ts"],"fileInfos":[{"version":"8859c12c614ce56ba9a18e58384a198f-/// <reference no-default-lib=\"true\"/>\ninterface Boolean {}\ninterface Function {}\ninterface CallableFunction {}\ninterface NewableFunction {}\ninterface IArguments {}\ninterface Number { toExponential: any; }\ninterface Object {}\ninterface RegExp {}\ninterface String { charAt: any; }\ninterface Array<T> { length: number; [n: number]: T; }\ninterface ReadonlyArray<T> {}\ninterface SymbolConstructor {\n    (desc?: string | number): symbol;\n    for(name: string): symbol;\n    readonly toStringTag: symbol;\n}\ndeclare var Symbol: SymbolConstructor;\ninterface Symbol {\n    readonly [Symbol.toStringTag]: string;\n}\ndeclare const console: { log(msg: any): void; };","affectsGlobalScope":true,"impliedNodeFormat":1},{"version":"c7aa180f19a42166d3166e266d7e59ec-export { }","signature":"abe7d9981d6018efb6b2b794f40a1607-export {};\n","impliedNodeFormat":1},{"version":"48cb0b944bf6ab58a2c0fa2f1d92b81b-import * as b from '../../beta/b'","signature":"abe7d9981d6018efb6b2b794f40a1607-export {};\n","impliedNodeFormat":1}],"fileIdsList":[[2]],"options":{"composite":true,"outDir":"./"},"referencedMap":[[3,1]],"latestChangedDtsFile":"./src/a.d.ts"}
 //// [/home/src/workspaces/project/alpha/bin/tsconfig.tsbuildinfo.readable.baseline.txt] *new* 
 {
   "version": "FakeTSVersion",
@@ -70,13 +74,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
     }
   ],
   "fileNames": [
-    "lib.d.ts",
+    "lib.es2025.full.d.ts",
     "../../beta/b.ts",
     "../src/a.ts"
   ],
   "fileInfos": [
     {
-      "fileName": "lib.d.ts",
+      "fileName": "lib.es2025.full.d.ts",
       "version": "8859c12c614ce56ba9a18e58384a198f-/// <reference no-default-lib=\"true\"/>\ninterface Boolean {}\ninterface Function {}\ninterface CallableFunction {}\ninterface NewableFunction {}\ninterface IArguments {}\ninterface Number { toExponential: any; }\ninterface Object {}\ninterface RegExp {}\ninterface String { charAt: any; }\ninterface Array<T> { length: number; [n: number]: T; }\ninterface ReadonlyArray<T> {}\ninterface SymbolConstructor {\n    (desc?: string | number): symbol;\n    for(name: string): symbol;\n    readonly toStringTag: symbol;\n}\ndeclare var Symbol: SymbolConstructor;\ninterface Symbol {\n    readonly [Symbol.toStringTag]: string;\n}\ndeclare const console: { log(msg: any): void; };",
       "signature": "8859c12c614ce56ba9a18e58384a198f-/// <reference no-default-lib=\"true\"/>\ninterface Boolean {}\ninterface Function {}\ninterface CallableFunction {}\ninterface NewableFunction {}\ninterface IArguments {}\ninterface Number { toExponential: any; }\ninterface Object {}\ninterface RegExp {}\ninterface String { charAt: any; }\ninterface Array<T> { length: number; [n: number]: T; }\ninterface ReadonlyArray<T> {}\ninterface SymbolConstructor {\n    (desc?: string | number): symbol;\n    for(name: string): symbol;\n    readonly toStringTag: symbol;\n}\ndeclare var Symbol: SymbolConstructor;\ninterface Symbol {\n    readonly [Symbol.toStringTag]: string;\n}\ndeclare const console: { log(msg: any): void; };",
       "affectsGlobalScope": true,
@@ -125,19 +129,18 @@ Object.defineProperty(exports, "__esModule", { value: true });
     ]
   },
   "latestChangedDtsFile": "./src/a.d.ts",
-  "size": 1321
+  "size": 1333
 }
 //// [/home/src/workspaces/project/beta/b.d.ts] *new* 
 export {};
 
 //// [/home/src/workspaces/project/beta/b.js] *new* 
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
+export {};
 
 
 alpha/tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/workspaces/project/beta/b.ts
 *refresh*    /home/src/workspaces/project/alpha/src/a.ts
 Signatures::

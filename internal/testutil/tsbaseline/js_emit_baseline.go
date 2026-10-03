@@ -9,9 +9,11 @@ import (
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/diagnosticwriter"
+	"github.com/microsoft/typescript-go/internal/outputpaths"
 	"github.com/microsoft/typescript-go/internal/parser"
 	"github.com/microsoft/typescript-go/internal/testutil/baseline"
 	"github.com/microsoft/typescript-go/internal/testutil/harnessutil"
+	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
 
@@ -55,9 +57,8 @@ func DoJSEmitBaseline(
 		}
 		if len(result.Diagnostics) == 0 && strings.HasSuffix(file.UnitName, tspath.ExtensionJson) {
 			fileParseResult := parser.ParseSourceFile(ast.SourceFileParseOptions{
-				FileName:        file.UnitName,
-				Path:            tspath.Path(file.UnitName),
-				CompilerOptions: options.SourceFileAffecting(),
+				FileName: file.UnitName,
+				Path:     tspath.Path(file.UnitName),
 			}, file.Content, core.ScriptKindJSON)
 			if len(fileParseResult.Diagnostics()) > 0 {
 				jsCode.WriteString(GetErrorBaseline(t, []*harnessutil.TestFile{file}, diagnosticwriter.WrapASTDiagnostics(fileParseResult.Diagnostics()), diagnosticwriter.CompareASTDiagnostics, false /*pretty*/))
@@ -152,7 +153,7 @@ func fileOutput(file *harnessutil.TestFile, settings *harnessutil.HarnessOptions
 	} else {
 		fileName = tspath.GetBaseFileName(file.UnitName)
 	}
-	return "//// [" + fileName + "]\r\n" + removeTestPathPrefixes(file.Content, false /*retainTrailingDirectorySeparator*/)
+	return "//// [" + fileName + "]\r\n" + file.Content
 }
 
 type declarationCompilationContext struct {
@@ -161,6 +162,7 @@ type declarationCompilationContext struct {
 	harnessSettings  *harnessutil.HarnessOptions
 	options          *core.CompilerOptions
 	currentDirectory string
+	config           *tsoptions.ParsedCommandLine
 }
 
 func prepareDeclarationCompilationContext(
@@ -174,10 +176,14 @@ func prepareDeclarationCompilationContext(
 ) *declarationCompilationContext {
 	if options.Declaration.IsTrue() && len(result.Diagnostics) == 0 {
 		if options.EmitDeclarationOnly.IsTrue() {
-			if result.JS.Size() > 0 || (result.DTS.Size() == 0 && !options.NoEmit.IsTrue()) {
+			if result.JS.Size() > 0 {
 				panic("Only declaration files should be generated when emitDeclarationOnly:true")
 			}
-		} else if result.DTS.Size() != result.GetNumberOfJSFiles(false /*includeJson*/) {
+			if result.DTS.Size() == 0 && !options.NoEmit.IsTrue() {
+				panic("Expected at least one declaration file to be emitted when emitDeclarationOnly:true and no errors were generated")
+			}
+		} else if !core.Some(result.Program.GetSourceFiles(), func(file *ast.SourceFile) bool { return file.ContentMapper() != "" }) &&
+			result.DTS.Size() != result.GetNumberOfJSFiles(false /*includeJson*/) {
 			panic("There were no errors and declFiles generated did not match number of js files generated")
 		}
 	}
@@ -210,14 +216,15 @@ func prepareDeclarationCompilationContext(
 			sourceFileName = sourceFile.FileName()
 		}
 
-		dTsFileName := tspath.RemoveFileExtension(sourceFileName) + tspath.GetDeclarationEmitExtensionForPath(sourceFileName)
+		dTsFileName := outputpaths.ChangeToDeclarationExtension(sourceFileName, result.Program.Program())
 		return result.DTS.GetOrZero(dTsFileName)
 	}
 
 	addDtsFile := func(file *harnessutil.TestFile, dtsFiles []*harnessutil.TestFile) []*harnessutil.TestFile {
 		if tspath.IsDeclarationFileName(file.UnitName) || tspath.HasJSONFileExtension(file.UnitName) {
 			dtsFiles = append(dtsFiles, file)
-		} else if tspath.HasTSFileExtension(file.UnitName) || (tspath.HasJSFileExtension(file.UnitName) && options.GetAllowJS()) {
+		} else if sourceFile := result.Program.GetSourceFile(file.UnitName); sourceFile != nil &&
+			(tspath.HasTSFileExtension(file.UnitName) || (tspath.HasJSFileExtension(file.UnitName) && options.GetAllowJS()) || sourceFile.ContentMapper() != "") {
 			declFile := findResultCodeFile(file.UnitName)
 			if declFile != nil && findUnit(declFile.UnitName, declInputFiles) == nil && findUnit(declFile.UnitName, declOtherFiles) == nil {
 				dtsFiles = append(dtsFiles, &harnessutil.TestFile{
@@ -238,11 +245,12 @@ func prepareDeclarationCompilationContext(
 			declOtherFiles = addDtsFile(file, declOtherFiles)
 		}
 		return &declarationCompilationContext{
-			declInputFiles,
-			declOtherFiles,
-			harnessSettings,
-			options,
-			core.IfElse(len(currentDirectory) > 0, currentDirectory, harnessSettings.CurrentDirectory),
+			declInputFiles:   declInputFiles,
+			declOtherFiles:   declOtherFiles,
+			harnessSettings:  harnessSettings,
+			options:          options,
+			currentDirectory: core.IfElse(len(currentDirectory) > 0, currentDirectory, harnessSettings.CurrentDirectory),
+			config:           result.Program.Program().CommandLine(),
 		}
 	}
 	return nil
@@ -258,6 +266,15 @@ func compileDeclarationFiles(t *testing.T, context *declarationCompilationContex
 	if context == nil {
 		return nil
 	}
+	var tsconfig *tsoptions.ParsedCommandLine
+	if context.config != nil && context.config.ConfigFile != nil {
+		tsconfig = &tsoptions.ParsedCommandLine{
+			ParsedConfig: &tsoptions.ParsedOptions{
+				ContentMappers: context.config.ContentMappers(),
+			},
+			ConfigFile: context.config.ConfigFile,
+		}
+	}
 	declFileCompilationResult := harnessutil.CompileFilesEx(t,
 		context.declInputFiles,
 		context.declOtherFiles,
@@ -265,7 +282,7 @@ func compileDeclarationFiles(t *testing.T, context *declarationCompilationContex
 		context.options,
 		context.currentDirectory,
 		symlinks,
-		nil)
+		tsconfig)
 	return &declarationCompilationResult{
 		context.declInputFiles,
 		context.declOtherFiles,

@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/diagnostics"
 	"github.com/microsoft/typescript-go/internal/module"
 	"github.com/microsoft/typescript-go/internal/scanner"
@@ -23,10 +22,9 @@ const (
 	fileIncludeKindLibReferenceDirective
 
 	fileIncludeKindRootFile
-	fileIncludeKindSourceFromProjectReference
-	fileIncludeKindOutputFromProjectReference
 	fileIncludeKindLibFile
 	fileIncludeKindAutomaticTypeDirectiveFile
+	fileIncludeKindContentMapperSupplemental
 )
 
 type FileIncludeReason struct {
@@ -192,18 +190,9 @@ func (r *FileIncludeReason) computeDiagnostic(program *Program, toFileName func(
 		} else {
 			return ast.NewCompilerDiagnostic(diagnostics.Root_file_specified_for_compilation)
 		}
-	case fileIncludeKindSourceFromProjectReference,
-		fileIncludeKindOutputFromProjectReference:
-		diag := core.IfElse(
-			r.kind == fileIncludeKindOutputFromProjectReference,
-			diagnostics.Output_from_referenced_project_0_included_because_module_is_specified_as_none,
-			diagnostics.Source_from_referenced_project_0_included_because_module_is_specified_as_none,
-		)
-		referencedResolvedRef := program.projectReferenceFileMapper.getResolvedProjectReferences()[r.asIndex()]
-		return ast.NewCompilerDiagnostic(diag, toFileName(referencedResolvedRef.ConfigName()))
 	case fileIncludeKindAutomaticTypeDirectiveFile:
 		data := r.asAutomaticTypeDirectiveFileData()
-		if program.Options().Types != nil {
+		if !program.Options().UsesWildcardTypes() {
 			if data.packageId.Name != "" {
 				return ast.NewCompilerDiagnostic(diagnostics.Entry_point_of_type_library_0_specified_in_compilerOptions_with_packageId_1, data.typeReference, data.packageId.String())
 			} else {
@@ -224,6 +213,9 @@ func (r *FileIncludeReason) computeDiagnostic(program *Program, toFileName func(
 		} else {
 			return ast.NewCompilerDiagnostic(diagnostics.Default_library)
 		}
+	case fileIncludeKindContentMapperSupplemental:
+		canonical := program.GetSourceFileByPath(r.data.(tspath.Path))
+		return ast.NewCompilerDiagnostic(diagnostics.Supplemental_virtual_file_produced_by_the_content_mapper_for_file_0, toFileName(canonical.FileName()))
 	default:
 		panic(fmt.Sprintf("unknown reason: %v", r.kind))
 	}
@@ -288,18 +280,8 @@ func (r *FileIncludeReason) toRelatedInfo(program *Program) *ast.Diagnostic {
 				return tsoptions.CreateDiagnosticForNodeInSourceFile(config.ConfigFile.SourceFile, includeNode.AsNode(), diagnostics.File_is_matched_by_include_pattern_specified_here)
 			}
 		}
-	case fileIncludeKindSourceFromProjectReference,
-		fileIncludeKindOutputFromProjectReference:
-		return tsoptions.CreateDiagnosticAtReferenceSyntax(
-			config,
-			r.asIndex(),
-			core.IfElse(
-				r.kind == fileIncludeKindOutputFromProjectReference,
-				diagnostics.File_is_output_from_referenced_project_specified_here,
-				diagnostics.File_is_source_from_referenced_project_specified_here,
-			))
 	case fileIncludeKindAutomaticTypeDirectiveFile:
-		if program.Options().Types != nil {
+		if !program.Options().UsesWildcardTypes() {
 			data := r.asAutomaticTypeDirectiveFileData()
 			if typesSyntax := tsoptions.GetOptionsSyntaxByArrayElementValue(program.includeProcessor.getCompilerOptionsObjectLiteralSyntax(program), "types", data.typeReference); typesSyntax != nil {
 				return tsoptions.CreateDiagnosticForNodeInSourceFile(config.ConfigFile.SourceFile, typesSyntax.AsNode(), diagnostics.File_is_entry_point_of_type_library_specified_here)
@@ -315,6 +297,8 @@ func (r *FileIncludeReason) toRelatedInfo(program *Program) *ast.Diagnostic {
 				return tsoptions.CreateDiagnosticForNodeInSourceFile(config.ConfigFile.SourceFile, targetValueSyntax.AsNode(), diagnostics.File_is_default_library_for_target_specified_here)
 			}
 		}
+	case fileIncludeKindContentMapperSupplemental:
+		return nil
 	default:
 		panic(fmt.Sprintf("unknown reason: %v", r.kind))
 	}

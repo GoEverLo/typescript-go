@@ -8,30 +8,23 @@ import (
 	"github.com/microsoft/typescript-go/internal/astnav"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/format"
+	"github.com/microsoft/typescript-go/internal/ls/lsconv"
+	"github.com/microsoft/typescript-go/internal/ls/lsutil"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/scanner"
+	"github.com/microsoft/typescript-go/internal/spanmap"
 )
-
-func toFormatCodeSettings(opt *lsproto.FormattingOptions, newLine string) *format.FormatCodeSettings {
-	initial := format.GetDefaultFormatCodeSettings(newLine)
-	initial.TabSize = int(opt.TabSize)
-	initial.IndentSize = int(opt.TabSize)
-	initial.ConvertTabsToSpaces = opt.InsertSpaces
-	if opt.TrimTrailingWhitespace != nil {
-		initial.TrimTrailingWhitespace = *opt.TrimTrailingWhitespace
-	}
-
-	// !!! get format settings
-	// TODO: We support a _lot_ more options than this
-	return initial
-}
 
 func (l *LanguageService) toLSProtoTextEdits(file *ast.SourceFile, changes []core.TextChange) []*lsproto.TextEdit {
 	result := make([]*lsproto.TextEdit, 0, len(changes))
 	for _, c := range changes {
+		lspRange, fidelity := l.converters.ToLSPRange(file, core.NewTextRange(c.Pos(), c.End()))
+		if !fidelity.IsExact() {
+			return nil
+		}
 		result = append(result, &lsproto.TextEdit{
 			NewText: c.NewText,
-			Range:   *l.createLspRangeFromBounds(c.Pos(), c.End(), file),
+			Range:   lspRange,
 		})
 	}
 	return result
@@ -42,11 +35,15 @@ func (l *LanguageService) ProvideFormatDocument(
 	documentURI lsproto.DocumentUri,
 	options *lsproto.FormattingOptions,
 ) (lsproto.DocumentFormattingResponse, error) {
+	if l.UserPreferences().EnableFormatting.IsFalse() {
+		return lsproto.TextEditsOrNull{}, nil
+	}
 	_, file := l.getProgramAndFile(documentURI)
+	formatOpts := lsutil.FromLSFormatOptions(l.FormatOptions(), options)
 	edits := l.toLSProtoTextEdits(file, l.getFormattingEditsForDocument(
 		ctx,
 		file,
-		toFormatCodeSettings(options, l.GetProgram().Options().NewLine.GetNewLineCharacter()),
+		formatOpts,
 	))
 	return lsproto.TextEditsOrNull{TextEdits: &edits}, nil
 }
@@ -57,12 +54,21 @@ func (l *LanguageService) ProvideFormatDocumentRange(
 	options *lsproto.FormattingOptions,
 	r lsproto.Range,
 ) (lsproto.DocumentRangeFormattingResponse, error) {
+	if l.UserPreferences().EnableFormatting.IsFalse() {
+		return lsproto.TextEditsOrNull{}, nil
+	}
 	_, file := l.getProgramAndFile(documentURI)
+	formatOpts := lsutil.FromLSFormatOptions(l.FormatOptions(), options)
+	ranges := lsconv.FromLSPRangeForSourceFile(l.converters, file, r, spanmap.FeatureFormatting)
+	if len(ranges) != 1 || !ranges[0].Fidelity.IsExact() {
+		return lsproto.TextEditsOrNull{}, nil
+	}
+	file = ranges[0].Script
 	edits := l.toLSProtoTextEdits(file, l.getFormattingEditsForRange(
 		ctx,
 		file,
-		toFormatCodeSettings(options, l.GetProgram().Options().NewLine.GetNewLineCharacter()),
-		l.converters.FromLSPRange(file, r),
+		formatOpts,
+		ranges[0].Span,
 	))
 	return lsproto.TextEditsOrNull{TextEdits: &edits}, nil
 }
@@ -74,12 +80,21 @@ func (l *LanguageService) ProvideFormatDocumentOnType(
 	position lsproto.Position,
 	character string,
 ) (lsproto.DocumentOnTypeFormattingResponse, error) {
+	if l.UserPreferences().EnableFormatting.IsFalse() {
+		return lsproto.TextEditsOrNull{}, nil
+	}
 	_, file := l.getProgramAndFile(documentURI)
+	formatOpts := lsutil.FromLSFormatOptions(l.FormatOptions(), options)
+	positions := lsconv.FromLSPPositionForSourceFile(l.converters, file, position, spanmap.FeatureFormatting)
+	if len(positions) != 1 || !positions[0].Fidelity.IsExact() {
+		return lsproto.TextEditsOrNull{}, nil
+	}
+	file = positions[0].Script
 	edits := l.toLSProtoTextEdits(file, l.getFormattingEditsAfterKeystroke(
 		ctx,
 		file,
-		toFormatCodeSettings(options, l.GetProgram().Options().NewLine.GetNewLineCharacter()),
-		int(l.converters.LineAndCharacterToPosition(file, position)),
+		formatOpts,
+		int(positions[0].Position),
 		character,
 	))
 	return lsproto.TextEditsOrNull{TextEdits: &edits}, nil
@@ -88,7 +103,7 @@ func (l *LanguageService) ProvideFormatDocumentOnType(
 func (l *LanguageService) getFormattingEditsForRange(
 	ctx context.Context,
 	file *ast.SourceFile,
-	options *format.FormatCodeSettings,
+	options lsutil.FormatCodeSettings,
 	r core.TextRange,
 ) []core.TextChange {
 	ctx = format.WithFormatCodeSettings(ctx, options, options.NewLineCharacter)
@@ -98,7 +113,7 @@ func (l *LanguageService) getFormattingEditsForRange(
 func (l *LanguageService) getFormattingEditsForDocument(
 	ctx context.Context,
 	file *ast.SourceFile,
-	options *format.FormatCodeSettings,
+	options lsutil.FormatCodeSettings,
 ) []core.TextChange {
 	ctx = format.WithFormatCodeSettings(ctx, options, options.NewLineCharacter)
 	return format.FormatDocument(ctx, file)
@@ -107,7 +122,7 @@ func (l *LanguageService) getFormattingEditsForDocument(
 func (l *LanguageService) getFormattingEditsAfterKeystroke(
 	ctx context.Context,
 	file *ast.SourceFile,
-	options *format.FormatCodeSettings,
+	options lsutil.FormatCodeSettings,
 	position int,
 	key string,
 ) []core.TextChange {

@@ -15,7 +15,7 @@ export enum Enum {
 
 export type Type = { x?: { [Enum.A]: 0 } };
 >Type : Type
->x : { a: 0; } | undefined
+>x : { [Enum.A]: 0; } | undefined
 >[Enum.A] : 0
 >Enum.A : Enum.A
 >Enum : typeof Enum
@@ -26,8 +26,8 @@ import { type Type } from "./type";
 >Type : any
 
 export const foo = { ...({} as Type) };
->foo : { x?: { a: 0; } | undefined; }
->{ ...({} as Type) } : { x?: { a: 0; } | undefined; }
+>foo : { x?: { a: 0; }; }
+>{ ...({} as Type) } : { x?: { a: 0; }; }
 >({} as Type) : Type
 >{} as Type : Type
 >{} : {}

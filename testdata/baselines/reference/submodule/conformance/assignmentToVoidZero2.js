@@ -21,9 +21,8 @@ j + k
 
 
 //// [assignmentToVoidZero2.js]
-export var j = 1;
+"use strict";
 exports.j = 1;
-export var k = void 0;
 exports.k = void 0;
 var o = {};
 o.x = 1;
@@ -43,13 +42,7 @@ assignmentToVoidZero2_1.j + assignmentToVoidZero2_1.k;
 
 
 //// [assignmentToVoidZero2.d.ts]
-export declare var j: number;
-export declare var k: undefined;
-declare namespace o {
-    var x: number;
-}
-declare namespace o {
-    var y: any;
-}
+export declare var j: 1;
+export declare var k: any;
 //// [importer.d.ts]
 export {};

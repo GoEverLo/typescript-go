@@ -38,11 +38,17 @@ const foo_1 = require("./foo");
 Object.defineProperty(exports, "foo", { enumerable: true, get: function () { return foo_1.foo; } });
 Object.defineProperty(exports, "arr", { enumerable: true, get: function () { return foo_1.arr; } });
 const { bar: baz, bat, bam: { bork: { bar: ibar, baz: ibaz } } } = foo_1.foo;
+exports.baz = baz;
+exports.ibaz = ibaz;
 const [, one, , [, bee, , [, { sec }]]] = foo_1.arr;
+exports.one = one;
+exports.bee = bee;
+exports.sec = sec;
 const getFoo = () => ({
     foo: 'foo'
 });
 const { foo: foo2 } = getFoo();
+exports.foo2 = foo2;
 
 
 //// [foo.d.ts]
@@ -65,9 +71,24 @@ export { foo, arr };
 //// [index.d.ts]
 import { foo, arr } from './foo';
 export { foo, arr };
-declare const baz: string, ibaz: string;
+declare const { bar: baz, bat, bam: { bork: { bar: ibar, baz: ibaz } } }: {
+    bar: string;
+    bat: string;
+    bam: {
+        bork: {
+            bar: string;
+            baz: string;
+        };
+    };
+};
 export { baz, ibaz };
-declare const one: 1, bee: "b", sec: "sec";
+declare const [, one, , [, bee, , [, { sec }]]]: [0, 1, 2, ["a", "b", "c", [{
+    def: 'def';
+}, {
+    sec: 'sec';
+}]]];
 export { one, bee, sec };
-declare const foo2: string;
+declare const { foo: foo2 }: {
+    foo: string;
+};
 export { foo2 };

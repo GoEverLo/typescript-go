@@ -14,6 +14,7 @@
 //                        ^
 // | ----------------------------------------------------------------------
 // | p2(**b: number**): number
+// | - `b: number`: number to add
 // | sum with property
 // | ----------------------------------------------------------------------
 //     }
@@ -23,6 +24,7 @@
 //                           ^
 // | ----------------------------------------------------------------------
 // | p2(**b: number**): number
+// | - `b: number`: number to add
 // | sum with property
 // | ----------------------------------------------------------------------
 //     }
@@ -38,6 +40,7 @@
 //                         ^
 // | ----------------------------------------------------------------------
 // | pp2(**b: number**): number
+// | - `b: number`: number to add
 // | sum with property
 // | ----------------------------------------------------------------------
 //     }
@@ -47,6 +50,7 @@
 //                             ^
 // | ----------------------------------------------------------------------
 // | pp2(**b: number**): number
+// | - `b: number`: number to add
 // | sum with property
 // | ----------------------------------------------------------------------
 //     }
@@ -65,6 +69,7 @@
 //                      ^
 // | ----------------------------------------------------------------------
 // | s2(**b: number**): number
+// | - `b: number`: number to add
 // | static sum with property
 // | ----------------------------------------------------------------------
 //     }
@@ -74,6 +79,7 @@
 //                       ^
 // | ----------------------------------------------------------------------
 // | s2(**b: number**): number
+// | - `b: number`: number to add
 // | static sum with property
 // | ----------------------------------------------------------------------
 //     }
@@ -144,6 +150,7 @@
 //                  ^
 // | ----------------------------------------------------------------------
 // | p2(**b: number**): number
+// | - `b: number`: number to add
 // | sum with property
 // | ----------------------------------------------------------------------
 // var i1_prop = i1.p3;
@@ -163,6 +170,7 @@
 //                    ^
 // | ----------------------------------------------------------------------
 // | s2(**b: number**): number
+// | - `b: number`: number to add
 // | static sum with property
 // | ----------------------------------------------------------------------
 // var i1_s_prop = c1.s3;
@@ -229,13 +237,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -258,13 +270,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -287,13 +303,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -316,13 +336,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -345,13 +369,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -374,13 +402,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -401,11 +433,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -426,11 +458,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -451,11 +483,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -476,11 +508,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -501,11 +533,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -526,11 +558,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -554,8 +586,7 @@
           "parameters": []
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -578,13 +609,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -605,11 +640,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -632,13 +667,17 @@
           },
           "parameters": [
             {
-              "label": "b: number"
+              "label": "b: number",
+              "documentation": {
+                "kind": "markdown",
+                "value": "number to add"
+              }
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   },
   {
@@ -659,11 +698,11 @@
             {
               "label": "b: number"
             }
-          ]
+          ],
+          "activeParameter": 0
         }
       ],
-      "activeSignature": 0,
-      "activeParameter": 0
+      "activeSignature": 0
     }
   }
 ]

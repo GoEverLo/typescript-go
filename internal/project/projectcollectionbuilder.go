@@ -7,8 +7,13 @@ import (
 	"slices"
 	"time"
 
+	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/collections"
+	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/contentmapper"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/diagnostics"
+	"github.com/microsoft/typescript-go/internal/ls/lsutil"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/project/dirty"
 	"github.com/microsoft/typescript-go/internal/project/logging"
@@ -26,24 +31,33 @@ const (
 )
 
 type ProjectCollectionBuilder struct {
-	sessionOptions      *SessionOptions
-	parseCache          *ParseCache
-	extendedConfigCache *ExtendedConfigCache
+	sessionOptions          *SessionOptions
+	parseCache              *ParseCache
+	contentMappedParseCache *ContentMappedParseCache
+	extendedConfigCache     *ExtendedConfigCache
+	contentMapperHost       contentmapper.Host
+	toPath                  func(fileName string) tspath.Path
 
 	ctx                                context.Context
 	fs                                 *snapshotFSBuilder
 	base                               *ProjectCollection
 	compilerOptionsForInferredProjects *core.CompilerOptions
+	inferredContentMappers             []*contentmapper.Mapper
+	inferredContentMapperExtensions    []string
 	configFileRegistryBuilder          *configFileRegistryBuilder
 
-	newSnapshotID           uint64
-	programStructureChanged bool
+	client Client // optional; used for project loading notifications
+
+	newSnapshotID              uint64
+	programStructureChanged    bool
+	defaultProjectsInvalidated bool
+	openFilesChanged           bool
 
 	fileDefaultProjects map[tspath.Path]tspath.Path
 	configuredProjects  *dirty.SyncMap[tspath.Path, *Project]
 	inferredProject     *dirty.Box[*Project]
 
-	apiOpenedProjects map[tspath.Path]struct{}
+	apiState APIState
 }
 
 func newProjectCollectionBuilder(
@@ -52,25 +66,37 @@ func newProjectCollectionBuilder(
 	fs *snapshotFSBuilder,
 	oldProjectCollection *ProjectCollection,
 	oldConfigFileRegistry *ConfigFileRegistry,
-	oldAPIOpenedProjects map[tspath.Path]struct{},
+	oldAPIState APIState,
 	compilerOptionsForInferredProjects *core.CompilerOptions,
+	inferredContentMappers []*contentmapper.Mapper,
+	inferredContentMapperExtensions []string,
 	sessionOptions *SessionOptions,
+	customConfigFileName string,
 	parseCache *ParseCache,
+	contentMappedParseCache *ContentMappedParseCache,
 	extendedConfigCache *ExtendedConfigCache,
+	contentMapperHost contentmapper.Host,
+	client Client,
 ) *ProjectCollectionBuilder {
 	return &ProjectCollectionBuilder{
 		ctx:                                ctx,
 		fs:                                 fs,
+		toPath:                             fs.toPath,
 		compilerOptionsForInferredProjects: compilerOptionsForInferredProjects,
+		inferredContentMappers:             inferredContentMappers,
+		inferredContentMapperExtensions:    inferredContentMapperExtensions,
 		sessionOptions:                     sessionOptions,
 		parseCache:                         parseCache,
+		contentMappedParseCache:            contentMappedParseCache,
 		extendedConfigCache:                extendedConfigCache,
+		contentMapperHost:                  contentMapperHost,
 		base:                               oldProjectCollection,
-		configFileRegistryBuilder:          newConfigFileRegistryBuilder(fs, oldConfigFileRegistry, extendedConfigCache, sessionOptions, nil),
+		configFileRegistryBuilder:          newConfigFileRegistryBuilder(lsproto.GetClientCapabilities(ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport, fs, oldConfigFileRegistry, extendedConfigCache, newSnapshotID, sessionOptions, customConfigFileName, nil),
 		newSnapshotID:                      newSnapshotID,
-		configuredProjects:                 dirty.NewSyncMap(oldProjectCollection.configuredProjects, nil),
+		configuredProjects:                 dirty.NewSyncMap(oldProjectCollection.configuredProjects),
 		inferredProject:                    dirty.NewBox(oldProjectCollection.inferredProject),
-		apiOpenedProjects:                  maps.Clone(oldAPIOpenedProjects),
+		apiState:                           oldAPIState.clone(),
+		client:                             client,
 	}
 }
 
@@ -89,7 +115,12 @@ func (b *ProjectCollectionBuilder) Finalize(logger *logging.LogTree) (*ProjectCo
 		newProjectCollection.configuredProjects = configuredProjects
 	}
 
-	if !changed && !maps.Equal(b.fileDefaultProjects, b.base.fileDefaultProjects) {
+	if b.openFilesChanged {
+		ensureCloned()
+		newProjectCollection.openFiles = openFilePaths(b.fs.overlays)
+	}
+
+	if !maps.Equal(b.fileDefaultProjects, b.base.fileDefaultProjects) {
 		ensureCloned()
 		newProjectCollection.fileDefaultProjects = b.fileDefaultProjects
 	}
@@ -100,7 +131,16 @@ func (b *ProjectCollectionBuilder) Finalize(logger *logging.LogTree) (*ProjectCo
 	}
 
 	configFileRegistry := b.configFileRegistryBuilder.Finalize()
-	newProjectCollection.configFileRegistry = configFileRegistry
+	if configFileRegistry != b.base.configFileRegistry {
+		ensureCloned()
+		newProjectCollection.configFileRegistry = configFileRegistry
+	}
+
+	if !b.apiState.equals(b.base.apiState) {
+		ensureCloned()
+		newProjectCollection.apiState = b.apiState
+	}
+
 	return newProjectCollection, configFileRegistry
 }
 
@@ -121,9 +161,18 @@ func (b *ProjectCollectionBuilder) forEachProject(fn func(entry dirty.Value[*Pro
 func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotRequest, logger *logging.LogTree) error {
 	var projectsToClose map[tspath.Path]struct{}
 	if apiRequest.CloseProjects != nil {
-		projectsToClose = maps.Clone(apiRequest.CloseProjects.M)
 		for projectPath := range apiRequest.CloseProjects.Keys() {
-			delete(b.apiOpenedProjects, projectPath)
+			// Ref-counted close: only actually close the project once the last
+			// API client that opened it releases it.
+			if count := b.apiState.openProjects[projectPath]; count > 1 {
+				b.apiState.openProjects[projectPath] = count - 1
+			} else if count == 1 {
+				delete(b.apiState.openProjects, projectPath)
+				if projectsToClose == nil {
+					projectsToClose = make(map[tspath.Path]struct{})
+				}
+				projectsToClose[projectPath] = struct{}{}
+			}
 		}
 	}
 
@@ -131,24 +180,51 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
 		for configFileName := range apiRequest.OpenProjects.Keys() {
 			configPath := b.toPath(configFileName)
 			if entry := b.findOrCreateProject(configFileName, configPath, projectLoadKindCreate, logger); entry != nil {
-				if b.apiOpenedProjects == nil {
-					b.apiOpenedProjects = make(map[tspath.Path]struct{})
+				if b.apiState.openProjects == nil {
+					b.apiState.openProjects = make(map[tspath.Path]int)
 				}
-				b.apiOpenedProjects[configPath] = struct{}{}
-				b.updateProgram(entry, logger)
+				b.apiState.openProjects[configPath]++
+				// A project re-opened in the same request shouldn't be closed.
+				delete(projectsToClose, configPath)
 			} else {
 				return fmt.Errorf("project not found for open: %s", configFileName)
 			}
 		}
 	}
 
-	if apiRequest.UpdateProjects != nil {
-		for configPath := range apiRequest.UpdateProjects.Keys() {
-			if entry, ok := b.configuredProjects.Load(configPath); ok {
-				b.updateProgram(entry, logger)
-			} else {
-				return fmt.Errorf("project not found for update: %s", configPath)
+	if apiRequest.CloseFiles != nil {
+		for path := range apiRequest.CloseFiles.Keys() {
+			// Ref-counted close mirroring projects above.
+			if entry, ok := b.apiState.openFiles[path]; ok {
+				if entry.refCount > 1 {
+					entry.refCount--
+					b.apiState.openFiles[path] = entry
+				} else {
+					delete(b.apiState.openFiles, path)
+				}
 			}
+		}
+	}
+
+	if apiRequest.OpenFiles != nil {
+		for uri := range apiRequest.OpenFiles.Keys() {
+			fileName := uri.FileName()
+			path := b.toPath(fileName)
+			if b.apiState.openFiles == nil {
+				b.apiState.openFiles = make(map[tspath.Path]apiOpenedFile)
+			}
+			entry := b.apiState.openFiles[path]
+			entry.fileName = fileName
+			entry.refCount++
+			b.apiState.openFiles[path] = entry
+		}
+	}
+
+	for configPath := range b.apiState.openProjects {
+		if entry, ok := b.configuredProjects.Load(configPath); ok {
+			b.updateProgram(entry, logger)
+		} else {
+			return fmt.Errorf("project not found for update: %s", configPath)
 		}
 	}
 
@@ -164,27 +240,58 @@ func (b *ProjectCollectionBuilder) HandleAPIRequest(apiRequest *APISnapshotReque
 		}
 	}
 
+	// Ensure each API-opened file is placed like LSP's textDocument/didOpen: search
+	// up ancestor directories for a configured project that contains it, and only
+	// fall back to the inferred project if none is found. This also keeps already
+	// loaded configured projects up to date. Then run the same cleanup the LSP open
+	// path uses, so configured projects auto-loaded for files that are no longer open
+	// are torn down instead of leaking.
+	if apiRequest.OpenFiles != nil || apiRequest.CloseFiles != nil {
+		var retain collections.Set[tspath.Path]
+		for path, file := range b.apiState.openFiles {
+			if b.fs.isOpenFile(path) {
+				// Already an LSP overlay; its project membership is handled by the
+				// overlay pass in cleanupConfiguredProjects.
+				continue
+			}
+			result := b.ensureConfiguredProjectAndAncestorsForFile(file.fileName, path, logger)
+			retain.Union(&result.retain)
+		}
+		b.cleanupConfiguredProjects(&retain, logger)
+	}
+	if b.inferredProject.Value() != nil {
+		b.updateProgram(b.inferredProject, logger)
+	}
+
 	return nil
 }
 
 func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, logger *logging.LogTree) {
-	changedFiles := make([]tspath.Path, 0, len(summary.Closed)+summary.Changed.Len())
-	for uri, hash := range summary.Closed {
-		fileName := uri.FileName()
-		path := b.toPath(fileName)
-		if fh := b.fs.GetFileByPath(fileName, path); fh == nil || fh.Hash() != hash {
-			changedFiles = append(changedFiles, path)
+	b.openFilesChanged = b.openFilesChanged || summary.Opened != "" || summary.Closed.Len() > 0
+
+	toPaths := func(uris collections.Set[lsproto.DocumentUri]) []tspath.Path {
+		paths := make([]tspath.Path, 0, uris.Len())
+		for uri := range uris.Keys() {
+			paths = append(paths, b.toPath(uri.FileName()))
 		}
+		return paths
 	}
-	for uri := range summary.Changed.Keys() {
-		fileName := uri.FileName()
-		path := b.toPath(fileName)
-		changedFiles = append(changedFiles, path)
+	changedFiles := toPaths(summary.Changed)
+	deletedFiles := toPaths(summary.Deleted)
+	createdFiles := toPaths(summary.Created)
+	if b.contentMapperHost != nil {
+		allWatchChanges := slices.Concat(changedFiles, deletedFiles, createdFiles)
+		b.forEachProject(func(entry dirty.Value[*Project]) bool {
+			b.refreshContentMapperProjectForChanges(entry, allWatchChanges, summary.HasExcessiveNonCreateWatchEvents(), logger)
+			return true
+		})
 	}
 
 	configChangeLogger := logger.Fork("Checking for changes affecting config files")
 	configChangeResult := b.configFileRegistryBuilder.DidChangeFiles(summary, configChangeLogger)
 	logChangeFileResult(configChangeResult, configChangeLogger)
+
+	b.programStructureChanged = b.markProjectsAffectedByConfigChanges(configChangeResult, logger)
 
 	b.forEachProject(func(entry dirty.Value[*Project]) bool {
 		// Only consider change/delete; creates are handled by the config file registry
@@ -201,10 +308,10 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
 
 		// Handle closed and changed files
 		b.markFilesChanged(entry, changedFiles, lsproto.FileChangeTypeChanged, logger)
-		if entry.Value().Kind == KindInferred && len(summary.Closed) > 0 {
+		if entry.Value().Kind == KindInferred && summary.Closed.Len() > 0 {
 			rootFilesMap := entry.Value().CommandLine.FileNamesByPath()
 			newRootFiles := entry.Value().CommandLine.FileNames()
-			for uri := range summary.Closed {
+			for uri := range summary.Closed.Keys() {
 				fileName := uri.FileName()
 				path := b.toPath(fileName)
 				if _, ok := rootFilesMap[path]; ok {
@@ -216,117 +323,129 @@ func (b *ProjectCollectionBuilder) DidChangeFiles(summary FileChangeSummary, log
 
 		// Handle deleted files
 		if summary.Deleted.Len() > 0 {
-			deletedPaths := make([]tspath.Path, 0, summary.Deleted.Len())
-			for uri := range summary.Deleted.Keys() {
-				fileName := uri.FileName()
-				path := b.toPath(fileName)
-				deletedPaths = append(deletedPaths, path)
-			}
-			b.markFilesChanged(entry, deletedPaths, lsproto.FileChangeTypeDeleted, logger)
+			b.markFilesChanged(entry, deletedFiles, lsproto.FileChangeTypeDeleted, logger)
 		}
 
 		// Handle created files
 		if summary.Created.Len() > 0 {
-			createdPaths := make([]tspath.Path, 0, summary.Created.Len())
-			for uri := range summary.Created.Keys() {
-				fileName := uri.FileName()
-				path := b.toPath(fileName)
-				createdPaths = append(createdPaths, path)
-			}
-			b.markFilesChanged(entry, createdPaths, lsproto.FileChangeTypeCreated, logger)
+			b.markFilesChanged(entry, createdFiles, lsproto.FileChangeTypeCreated, logger)
 		}
 
 		return true
 	})
 
 	// Handle opened file
-	if summary.Opened != "" {
-		fileName := summary.Opened.FileName()
+	if summary.Opened != "" || summary.Reopened != "" {
+		fileName := core.FirstNonZero(summary.Opened, summary.Reopened).FileName()
 		path := b.toPath(fileName)
-		var toRemoveProjects collections.Set[tspath.Path]
 		openFileResult := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
-		b.configuredProjects.Range(func(entry *dirty.SyncMapEntry[tspath.Path, *Project]) bool {
-			toRemoveProjects.Add(entry.Key())
-			return true
-		})
-		var isReferencedBy func(project *Project, refPath tspath.Path, seenProjects *collections.Set[*Project]) bool
-		isReferencedBy = func(project *Project, refPath tspath.Path, seenProjects *collections.Set[*Project]) bool {
-			if !seenProjects.AddIfAbsent(project) {
-				return false
-			}
+		b.cleanupConfiguredProjects(&openFileResult.retain, logger)
+	}
+}
 
-			if project.potentialProjectReferences != nil {
-				for potentialRef := range project.potentialProjectReferences.Keys() {
-					if potentialRef == refPath {
-						return true
-					}
+func (b *ProjectCollectionBuilder) refreshContentMapperProjectForChanges(entry dirty.Value[*Project], paths []tspath.Path, refreshAll bool, logger *logging.LogTree) {
+	project := entry.Value()
+	if project.Program == nil || project.contentMapperWatchedFiles == nil {
+		return
+	}
+	affected := refreshAll
+	if !affected {
+		if slices.ContainsFunc(paths, project.contentMapperWatchedFiles.Has) {
+			affected = true
+		}
+	}
+	if !affected {
+		return
+	}
+	if contentMapperProject := project.Program.ContentMapperProject(); contentMapperProject != nil {
+		_ = contentMapperProject.Refresh()
+	}
+	entry.Change(func(project *Project) {
+		project.dirty = true
+		project.dirtyFilePath = ""
+		if logger != nil {
+			logger.Logf("Marking project as dirty due to content mapper configuration changes: %s", project.configFilePath)
+		}
+	})
+}
+
+// cleanupConfiguredProjects sweeps the loaded configured projects and unloads those
+// that are no longer needed. Starting from the set of all configured projects, it
+// retains any project that is the default project (along with its references and
+// ancestor configs) of an open overlay file or an API-opened file, any project
+// explicitly opened through the API, and any project in retain (e.g. the ancestor
+// solution tree built for a freshly opened overlay file). Every other configured
+// project is deleted, the inferred project roots are recomputed, and the config file
+// registry is cleaned up. This is the shared mechanism that keeps the set of loaded
+// projects minimal for both LSP file opens and API file opens/closes.
+func (b *ProjectCollectionBuilder) cleanupConfiguredProjects(retain *collections.Set[tspath.Path], logger *logging.LogTree) {
+	var toRemoveProjects collections.Set[tspath.Path]
+	b.configuredProjects.Range(func(entry *dirty.SyncMapEntry[tspath.Path, *Project]) bool {
+		toRemoveProjects.Add(entry.Key())
+		return true
+	})
+
+	retainProjectAndReferences := func(project *Project) {
+		// Retain project
+		toRemoveProjects.Delete(project.configFilePath)
+		if program := project.GetProgram(); program != nil {
+			program.RangeResolvedProjectReference(func(referencePath tspath.Path, _ *tsoptions.ParsedCommandLine, _ *tsoptions.ParsedCommandLine, _ int) bool {
+				if _, ok := b.configuredProjects.Load(referencePath); ok {
+					toRemoveProjects.Delete(referencePath)
 				}
-				for potentialRef := range project.potentialProjectReferences.Keys() {
-					if refProject, foundRef := b.configuredProjects.Load(potentialRef); foundRef && isReferencedBy(refProject.Value(), refPath, seenProjects) {
-						return true
-					}
-				}
-			} else if program := project.GetProgram(); program != nil && !program.RangeResolvedProjectReference(func(referencePath tspath.Path, _ *tsoptions.ParsedCommandLine, _ *tsoptions.ParsedCommandLine, _ int) bool {
-				return referencePath != refPath
-			}) {
 				return true
-			}
-			return false
-		}
-
-		retainProjectAndReferences := func(project *Project) {
-			// Retain project
-			toRemoveProjects.Delete(project.configFilePath)
-			if program := project.GetProgram(); program != nil {
-				program.RangeResolvedProjectReference(func(referencePath tspath.Path, _ *tsoptions.ParsedCommandLine, _ *tsoptions.ParsedCommandLine, _ int) bool {
-					if _, ok := b.configuredProjects.Load(referencePath); ok {
-						toRemoveProjects.Delete(referencePath)
-					}
-					return true
-				})
-			}
-		}
-
-		retainDefaultConfiguredProject := func(openFile string, openFilePath tspath.Path, project *Project) {
-			// Retain project and its references
-			retainProjectAndReferences(project)
-
-			// Retain all the ancestor projects
-			b.configFileRegistryBuilder.forEachConfigFileNameFor(openFile, openFilePath, func(configFileName string) {
-				if ancestor := b.findOrCreateProject(configFileName, b.toPath(configFileName), projectLoadKindFind, logger); ancestor != nil {
-					retainProjectAndReferences(ancestor.Value())
-				}
 			})
 		}
-
-		var inferredProjectFiles []string
-		for _, overlay := range b.fs.overlays {
-			openFile := overlay.FileName()
-			openFilePath := b.toPath(openFile)
-			if p := b.findDefaultConfiguredProject(openFile, openFilePath); p != nil {
-				retainDefaultConfiguredProject(openFile, openFilePath, p.Value())
-			} else {
-				inferredProjectFiles = append(inferredProjectFiles, overlay.FileName())
-			}
-		}
-
-		for projectPath := range toRemoveProjects.Keys() {
-			if openFileResult.retain.Has(projectPath) {
-				continue
-			}
-			if _, ok := b.apiOpenedProjects[projectPath]; ok {
-				continue
-			}
-			if p, ok := b.configuredProjects.Load(projectPath); ok {
-				b.deleteConfiguredProject(p, logger)
-			}
-		}
-		slices.Sort(inferredProjectFiles)
-		b.updateInferredProjectRoots(inferredProjectFiles, logger)
-		b.configFileRegistryBuilder.Cleanup()
 	}
 
-	b.programStructureChanged = b.markProjectsAffectedByConfigChanges(configChangeResult, logger)
+	retainDefaultConfiguredProject := func(openFilePath tspath.Path, project *Project) {
+		// Retain project and its references
+		retainProjectAndReferences(project)
+
+		// Retain all the ancestor projects
+		b.configFileRegistryBuilder.forEachConfigFileNameFor(openFilePath, func(configFileName string) {
+			if ancestor := b.findOrCreateProject(configFileName, b.toPath(configFileName), projectLoadKindFind, logger); ancestor != nil {
+				retainProjectAndReferences(ancestor.Value())
+			}
+		})
+	}
+
+	var inferredProjectFiles []string
+	for _, overlay := range b.fs.overlays {
+		openFile := overlay.FileName()
+		openFilePath := b.toPath(openFile)
+		if p := b.findDefaultConfiguredProject(openFile, openFilePath); p != nil {
+			retainDefaultConfiguredProject(openFilePath, p.Value())
+		} else {
+			inferredProjectFiles = append(inferredProjectFiles, openFile)
+		}
+	}
+	// Treat API-opened files like open files: retain their configured project (so
+	// an LSP-driven open doesn't close it), or keep them as inferred project roots.
+	for path, file := range b.apiState.openFiles {
+		if b.fs.isOpenFile(path) {
+			continue
+		}
+		if p := b.findDefaultConfiguredProject(file.fileName, path); p != nil {
+			retainDefaultConfiguredProject(path, p.Value())
+		} else {
+			inferredProjectFiles = append(inferredProjectFiles, file.fileName)
+		}
+	}
+
+	for projectPath := range toRemoveProjects.Keys() {
+		if retain.Has(projectPath) {
+			continue
+		}
+		if _, ok := b.apiState.openProjects[projectPath]; ok {
+			continue
+		}
+		if p, ok := b.configuredProjects.Load(projectPath); ok {
+			b.deleteConfiguredProject(p, logger)
+		}
+	}
+	b.updateInferredProjectRoots(inferredProjectFiles, logger)
+	b.configFileRegistryBuilder.Cleanup()
 }
 
 func logChangeFileResult(result changeFileResult, logger *logging.LogTree) {
@@ -338,17 +457,78 @@ func logChangeFileResult(result changeFileResult, logger *logging.LogTree) {
 	}
 }
 
-func (b *ProjectCollectionBuilder) DidRequestFile(uri lsproto.DocumentUri, logger *logging.LogTree) {
+func (b *ProjectCollectionBuilder) collectInferredProjectRoots() []string {
+	var inferredProjectFiles []string
+	for path, overlay := range b.fs.overlays {
+		if b.findDefaultConfiguredProject(overlay.FileName(), path) == nil {
+			inferredProjectFiles = append(inferredProjectFiles, overlay.FileName())
+		}
+	}
+	return b.appendAPIOpenedInferredRoots(inferredProjectFiles)
+}
+
+// appendAPIOpenedInferredRoots appends API-opened files that aren't open in an
+// overlay and have no configured project, so they're kept as inferred project
+// roots and persist across snapshots.
+func (b *ProjectCollectionBuilder) appendAPIOpenedInferredRoots(inferredProjectFiles []string) []string {
+	for path, file := range b.apiState.openFiles {
+		if b.fs.isOpenFile(path) {
+			continue
+		}
+		if b.findDefaultConfiguredProject(file.fileName, path) == nil {
+			inferredProjectFiles = append(inferredProjectFiles, file.fileName)
+		}
+	}
+	return inferredProjectFiles
+}
+
+func (b *ProjectCollectionBuilder) cleanupInferredProject(logger *logging.LogTree) {
+	b.updateInferredProjectRoots(b.collectInferredProjectRoots(), logger)
+}
+
+func (b *ProjectCollectionBuilder) DidChangeContentMapperContributions(logger *logging.LogTree) {
+	b.cleanupInferredProject(logger)
+	if b.inferredProject.Value() != nil {
+		b.updateProgram(b.inferredProject, logger)
+	}
+}
+
+func (b *ProjectCollectionBuilder) ensureInferredProjectIncludesClosedFile(fileName string, logger *logging.LogTree) {
+	// Collect existing inferred project roots (open files not in configured projects)
+	// plus this closed file.
+	inferredProjectFiles := append(b.collectInferredProjectRoots(), fileName)
+	b.updateInferredProjectRoots(inferredProjectFiles, logger)
+	if b.inferredProject.Value() != nil {
+		b.updateProgram(b.inferredProject, logger)
+	}
+}
+
+// DidRequestFile ensures projects are loaded for the given URI.
+// If configuredProjectsOnly is true, only configured projects are loaded; no inferred project is created
+// and it is not guaranteed that there will be any project containing the file in the resulting snapshot.
+func (b *ProjectCollectionBuilder) DidRequestFile(uri lsproto.DocumentUri, configuredProjectsOnly bool, logger *logging.LogTree) {
 	startTime := time.Now()
 	fileName := uri.FileName()
 	path := b.toPath(fileName)
+	if b.defaultProjectsInvalidated {
+		b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
+		if !b.fs.isOpenFile(path) {
+			return
+		}
+	}
 	if b.fs.isOpenFile(path) {
 		hasChanges := b.programStructureChanged
 
 		// See if we can find a default project without updating a bunch of stuff.
 		if result := b.findDefaultProject(fileName, path); result != nil {
 			hasChanges = b.updateProgram(result, logger) || hasChanges
-			if result.Value() != nil {
+			if result.Value() != nil && result.Value().containsFile(path) {
+				if hasChanges {
+					b.cleanupInferredProject(logger)
+					if b.inferredProject.Value() != nil {
+						b.updateProgram(b.inferredProject, logger)
+					}
+				}
 				return
 			}
 		}
@@ -361,15 +541,7 @@ func (b *ProjectCollectionBuilder) DidRequestFile(uri lsproto.DocumentUri, logge
 		if hasChanges {
 			// If the structure of other projects changed, we might need to move files
 			// in/out of the inferred project.
-			var inferredProjectFiles []string
-			for path, overlay := range b.fs.overlays {
-				if b.findDefaultConfiguredProject(overlay.FileName(), path) == nil {
-					inferredProjectFiles = append(inferredProjectFiles, overlay.FileName())
-				}
-			}
-			if len(inferredProjectFiles) > 0 {
-				b.updateInferredProjectRoots(inferredProjectFiles, logger)
-			}
+			b.cleanupInferredProject(logger)
 		}
 
 		if b.inferredProject.Value() != nil {
@@ -384,7 +556,12 @@ func (b *ProjectCollectionBuilder) DidRequestFile(uri lsproto.DocumentUri, logge
 		// really even have an error condition until it tries to ask us language questions about
 		// a non-TS-handleable file.
 	} else {
-		b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
+		result := b.ensureConfiguredProjectAndAncestorsForFile(fileName, path, logger)
+		if result.project == nil && !configuredProjectsOnly {
+			// No configured project found for this closed file.
+			// Add it to the inferred project so language service requests can be served.
+			b.ensureInferredProjectIncludesClosedFile(fileName, logger)
+		}
 	}
 
 	if logger != nil {
@@ -412,7 +589,7 @@ func (b *ProjectCollectionBuilder) DidRequestProject(projectId tspath.Path, logg
 	}
 }
 
-func (b *ProjectCollectionBuilder) DidRequestProjectTrees(projectsReferenced map[tspath.Path]struct{}, logger *logging.LogTree) {
+func (b *ProjectCollectionBuilder) DidRequestProjectTrees(projectTreeRequest *ProjectTreeRequest, logger *logging.LogTree) {
 	startTime := time.Now()
 
 	var currentProjects []tspath.Path
@@ -428,10 +605,10 @@ func (b *ProjectCollectionBuilder) DidRequestProjectTrees(projectsReferenced map
 			if entry, ok := b.configuredProjects.Load(projectId); ok {
 				// If this project has potential project reference for any of the project we are loading ancestor tree for
 				// load this project first
-				if project := entry.Value(); project != nil && (projectsReferenced == nil || project.hasPotentialProjectReference(projectsReferenced)) {
+				if project := entry.Value(); project != nil && (projectTreeRequest.IsAllProjects() || project.hasPotentialProjectReference(projectTreeRequest)) {
 					b.updateProgram(entry, logger)
 				}
-				b.ensureProjectTree(wg, entry, projectsReferenced, &seenProjects, logger)
+				b.ensureProjectTree(wg, entry, projectTreeRequest, &seenProjects, logger)
 			}
 		})
 	}
@@ -439,14 +616,14 @@ func (b *ProjectCollectionBuilder) DidRequestProjectTrees(projectsReferenced map
 
 	if logger != nil {
 		elapsed := time.Since(startTime)
-		logger.Log(fmt.Sprintf("Completed project tree request for %v in %v", maps.Keys(projectsReferenced), elapsed))
+		logger.Log(fmt.Sprintf("Completed project tree request for %v in %v", projectTreeRequest.Projects(), elapsed))
 	}
 }
 
 func (b *ProjectCollectionBuilder) ensureProjectTree(
 	wg core.WorkGroup,
 	entry *dirty.SyncMapEntry[tspath.Path, *Project],
-	projectsReferenced map[tspath.Path]struct{},
+	projectTreeRequest *ProjectTreeRequest,
 	seenProjects *collections.SyncSet[tspath.Path],
 	logger *logging.LogTree,
 ) {
@@ -474,13 +651,16 @@ func (b *ProjectCollectionBuilder) ensureProjectTree(
 		return
 	}
 	for _, childConfig := range children {
+		if childConfig == nil {
+			continue
+		}
 		wg.Queue(func() {
-			if projectsReferenced != nil && program.RangeResolvedProjectReferenceInChildConfig(
+			if !projectTreeRequest.IsAllProjects() && program.RangeResolvedProjectReferenceInChildConfig(
 				childConfig,
 				func(referencePath tspath.Path, config *tsoptions.ParsedCommandLine, _ *tsoptions.ParsedCommandLine, _ int) bool {
-					_, isReferenced := projectsReferenced[referencePath]
-					return !isReferenced
-				}) {
+					return !projectTreeRequest.IsProjectReferenced(referencePath)
+				},
+			) {
 				return
 			}
 
@@ -489,7 +669,7 @@ func (b *ProjectCollectionBuilder) ensureProjectTree(
 			b.updateProgram(childProjectEntry, logger)
 
 			// Ensure children for this project
-			b.ensureProjectTree(wg, childProjectEntry, projectsReferenced, seenProjects, logger)
+			b.ensureProjectTree(wg, childProjectEntry, projectTreeRequest, seenProjects, logger)
 		})
 	}
 }
@@ -537,6 +717,33 @@ func (b *ProjectCollectionBuilder) DidUpdateATAState(ataChanges map[tspath.Path]
 			logger.Log(fmt.Sprintf("Updated ATA state for project %s", projectPath))
 		}
 	}
+}
+
+// if customConfigFileName changes, invalidate default projects.
+func (b *ProjectCollectionBuilder) DidChangeCustomConfigFileName(logger *logging.LogTree) {
+	if !b.configFileRegistryBuilder.DidChangeCustomConfigFileName(logger) {
+		return
+	}
+
+	b.fileDefaultProjects = nil
+	b.defaultProjectsInvalidated = true
+	b.programStructureChanged = true
+}
+
+func (b *ProjectCollectionBuilder) DidChangeUserPreferences(oldPreferences, newPreferences lsutil.UserPreferences, logger *logging.LogTree) {
+	if oldPreferences.Locale == newPreferences.Locale {
+		return
+	}
+	b.forEachProject(func(entry dirty.Value[*Project]) bool {
+		entry.Change(func(project *Project) {
+			project.dirty = true
+			project.dirtyFilePath = ""
+			if logger != nil {
+				logger.Logf("Marking project as dirty due to locale change: %s", project.configFilePath)
+			}
+		})
+		return true
+	})
 }
 
 func (b *ProjectCollectionBuilder) markProjectsAffectedByConfigChanges(
@@ -589,7 +796,11 @@ func (b *ProjectCollectionBuilder) findDefaultProject(fileName string, path tspa
 }
 
 func (b *ProjectCollectionBuilder) findDefaultConfiguredProject(fileName string, path tspath.Path) *dirty.SyncMapEntry[tspath.Path, *Project] {
-	// !!! look in fileDefaultProjects first?
+	if key, ok := b.fileDefaultProjects[path]; ok && key != inferredProjectName {
+		if entry, ok := b.configuredProjects.Load(key); ok {
+			return entry
+		}
+	}
 	// Sort configured projects so we can use a deterministic "first" as a last resort.
 	var configuredProjectPaths []tspath.Path
 	configuredProjects := make(map[tspath.Path]*dirty.SyncMapEntry[tspath.Path, *Project])
@@ -892,11 +1103,8 @@ func (b *ProjectCollectionBuilder) findOrCreateProject(
 	return entry
 }
 
-func (b *ProjectCollectionBuilder) toPath(fileName string) tspath.Path {
-	return tspath.ToPath(fileName, b.sessionOptions.CurrentDirectory, b.fs.fs.UseCaseSensitiveFileNames())
-}
-
 func (b *ProjectCollectionBuilder) updateInferredProjectRoots(rootFileNames []string, logger *logging.LogTree) bool {
+	rootFileNames = core.Filter(rootFileNames, b.isSupportedInInferredProject)
 	if len(rootFileNames) == 0 {
 		if b.inferredProject.Value() != nil {
 			if logger != nil {
@@ -908,29 +1116,29 @@ func (b *ProjectCollectionBuilder) updateInferredProjectRoots(rootFileNames []st
 		return false
 	}
 
+	slices.Sort(rootFileNames)
+	contentMappers := b.inferredContentMappers
 	if b.inferredProject.Value() == nil {
-		b.inferredProject.Set(NewInferredProject(b.sessionOptions.CurrentDirectory, b.compilerOptionsForInferredProjects, rootFileNames, b, logger))
+		b.inferredProject.Set(NewInferredProject(b.sessionOptions.CurrentDirectory, b.compilerOptionsForInferredProjects, rootFileNames, contentMappers, b, logger))
 	} else {
 		newCompilerOptions := b.inferredProject.Value().CommandLine.CompilerOptions()
 		if b.compilerOptionsForInferredProjects != nil {
 			newCompilerOptions = b.compilerOptionsForInferredProjects
 		}
-		newCommandLine := tsoptions.NewParsedCommandLine(newCompilerOptions, rootFileNames, tspath.ComparePathsOptions{
+		newCommandLine := newInferredProjectCommandLine(newCompilerOptions, rootFileNames, contentMappers, tspath.ComparePathsOptions{
 			UseCaseSensitiveFileNames: b.fs.fs.UseCaseSensitiveFileNames(),
 			CurrentDirectory:          b.sessionOptions.CurrentDirectory,
 		})
 		changed := b.inferredProject.ChangeIf(
 			func(p *Project) bool {
-				return !maps.Equal(p.CommandLine.FileNamesByPath(), newCommandLine.FileNamesByPath())
+				return !maps.Equal(p.CommandLine.FileNamesByPath(), newCommandLine.FileNamesByPath()) ||
+					!slices.Equal(p.CommandLine.ContentMappers(), newCommandLine.ContentMappers())
 			},
 			func(p *Project) {
 				if logger != nil {
 					logger.Log(fmt.Sprintf("Updating inferred project config with %d root files", len(rootFileNames)))
 				}
-				p.CommandLine = newCommandLine
-				p.commandLineWithTypingsFiles = nil
-				p.dirty = true
-				p.dirtyFilePath = ""
+				p.SetCommandLine(newCommandLine)
 			},
 		)
 		if !changed {
@@ -940,13 +1148,26 @@ func (b *ProjectCollectionBuilder) updateInferredProjectRoots(rootFileNames []st
 	return true
 }
 
+func (b *ProjectCollectionBuilder) isSupportedInInferredProject(fileName string) bool {
+	if tspath.IsDynamicFileName(fileName) || core.GetScriptKindFromFileName(fileName) != core.ScriptKindUnknown {
+		return true
+	}
+	if file := b.fs.GetFile(fileName); file != nil && file.IsOverlay() && tspath.GetAnyExtensionFromPath(fileName, nil, false) == "" {
+		return true
+	}
+	return tspath.FileExtensionIsOneOf(fileName, b.inferredContentMapperExtensions)
+}
+
 // updateProgram updates the program for the given project entry if necessary. It returns
 // a boolean indicating whether the update could have caused any structure-affecting changes.
 func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], logger *logging.LogTree) bool {
 	var updateProgram bool
+	var deleteProject bool
 	var filesChanged bool
 	configFileName := entry.Value().configFileName
 	startTime := time.Now()
+	var notifiedLoading bool
+	var displayName string
 	entry.Locked(func(entry dirty.Value[*Project]) {
 		if entry.Value().Kind == KindConfigured {
 			commandLine := b.configFileRegistryBuilder.acquireConfigForProject(
@@ -955,17 +1176,15 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
 				entry.Value(),
 				logger.Fork("Acquiring config for project"),
 			)
+			if commandLine == nil {
+				deleteProject = true
+				filesChanged = true
+				return
+			}
 			if entry.Value().CommandLine != commandLine {
 				updateProgram = true
-				if commandLine == nil {
-					b.deleteConfiguredProject(entry, logger)
-					filesChanged = true
-					return
-				}
 				entry.Change(func(p *Project) {
-					p.CommandLine = commandLine
-					p.commandLineWithTypingsFiles = nil
-					p.potentialProjectReferences = nil
+					p.SetCommandLine(commandLine)
 				})
 			}
 		}
@@ -973,31 +1192,72 @@ func (b *ProjectCollectionBuilder) updateProgram(entry dirty.Value[*Project], lo
 			updateProgram = entry.Value().dirty
 		}
 		if updateProgram {
+			if b.client != nil {
+				displayName = entry.Value().DisplayName(b.sessionOptions.CurrentDirectory)
+				notifiedLoading = true
+			}
+		}
+	})
+	if notifiedLoading && b.client != nil {
+		b.client.ProgressStart(diagnostics.Project_0, displayName)
+	}
+	if deleteProject {
+		b.deleteConfiguredProject(entry, logger)
+	}
+	if updateProgram {
+		entry.Locked(func(entry dirty.Value[*Project]) {
 			entry.Change(func(project *Project) {
 				oldHost := project.host
+				oldProgram := project.Program
+				oldCheckerPool := project.checkerPool
 				project.host = newCompilerHost(project.currentDirectory, project, b, logger.Fork("CompilerHost"))
 				result := project.CreateProgram()
+				var watchedFiles []string
+				for _, mapper := range project.CommandLine.ContentMappers() {
+					if mapper.Package != "" && mapper.ContributionID == "" && mapper.PackageDirectory != "" {
+						watchedFiles = append(watchedFiles, tspath.CombinePaths(mapper.PackageDirectory, "package.json"))
+					}
+				}
+				if slices.ContainsFunc(result.Program.SourceFiles(), func(file *ast.SourceFile) bool {
+					return file.ContentMapper() != ""
+				}) {
+					project.host.ensureContentMapperProject()
+				}
+				contentMapperProject := project.host.ContentMapperProject()
+				if contentMapperProject != nil {
+					dynamicWatchedFiles, _ := contentMapperProject.WatchedFiles()
+					watchedFiles = append(watchedFiles, dynamicWatchedFiles...)
+				}
+				slices.Sort(watchedFiles)
+				watchedFiles = slices.Compact(watchedFiles)
+				project.contentMapperWatch = project.contentMapperWatch.Clone(watchedFiles)
+				project.contentMapperWatchedFiles = collections.NewSetWithSizeHint[tspath.Path](len(watchedFiles))
+				for _, fileName := range watchedFiles {
+					project.contentMapperWatchedFiles.Add(b.toPath(fileName))
+				}
 				project.Program = result.Program
-				project.checkerPool = result.CheckerPool
+				project.checkerPool = result.Program.GetCheckerPool().(*checkerPool)
 				project.ProgramUpdateKind = result.UpdateKind
 				project.ProgramLastUpdate = b.newSnapshotID
 				if result.UpdateKind == ProgramUpdateKindCloned {
-					project.host.seenFiles = oldHost.seenFiles
+					project.host.sourceFS.seenFiles = oldHost.sourceFS.seenFiles
 				}
 				if result.UpdateKind == ProgramUpdateKindNewFiles {
 					filesChanged = true
-					if b.sessionOptions.WatchEnabled {
-						programFilesWatch, failedLookupsWatch, affectingLocationsWatch := project.CloneWatchers(b.sessionOptions.CurrentDirectory, b.sessionOptions.DefaultLibraryPath)
-						project.programFilesWatch = programFilesWatch
-						project.failedLookupsWatch = failedLookupsWatch
-						project.affectingLocationsWatch = affectingLocationsWatch
-					}
+					project.programFilesWatch = project.CloneWatchers()
 				}
 				project.dirty = false
 				project.dirtyFilePath = ""
+				b.releaseDroppedProjectReferences(oldProgram, result.Program, project.configFilePath)
+				if oldCheckerPool != nil {
+					oldCheckerPool.Discard()
+				}
 			})
-		}
-	})
+		})
+	}
+	if notifiedLoading && b.client != nil {
+		b.client.ProgressFinish(diagnostics.Project_0, displayName)
+	}
 	if updateProgram && logger != nil {
 		elapsed := time.Since(startTime)
 		logger.Log(fmt.Sprintf("Program update for %s completed in %v", configFileName, elapsed))
@@ -1016,20 +1276,16 @@ func (b *ProjectCollectionBuilder) markFilesChanged(entry dirty.Value[*Project],
 
 			dirtyFilePath = p.dirtyFilePath
 			for _, path := range paths {
-				if changeType == lsproto.FileChangeTypeCreated {
-					if _, ok := p.affectingLocationsWatch.input[path]; ok {
-						dirty = true
-						dirtyFilePath = ""
-						break
-					}
-					if _, ok := p.failedLookupsWatch.input[path]; ok {
-						dirty = true
-						dirtyFilePath = ""
-						break
-					}
-				} else if p.containsFile(path) {
+				if p.containsFile(path) {
 					dirty = true
 					if changeType == lsproto.FileChangeTypeDeleted {
+						dirtyFilePath = ""
+						break
+					}
+					// package.json changes can affect module resolution and package
+					// identity (e.g. dedup decisions), so they must always trigger
+					// a full rebuild rather than a single-file clone.
+					if tspath.GetBaseFileName(string(path)) == "package.json" {
 						dirtyFilePath = ""
 						break
 					}
@@ -1039,6 +1295,12 @@ func (b *ProjectCollectionBuilder) markFilesChanged(entry dirty.Value[*Project],
 						dirtyFilePath = ""
 						break
 					}
+				} else if p.host != nil &&
+					(changeType == lsproto.FileChangeTypeCreated && p.host.sourceFS.SeenFileOrMissingParentDirectory(path) ||
+						changeType != lsproto.FileChangeTypeCreated && p.host.sourceFS.SeenFile(path)) {
+					dirty = true
+					dirtyFilePath = ""
+					break
 				}
 			}
 			return dirty || p.dirtyFilePath != dirtyFilePath
@@ -1070,4 +1332,27 @@ func (b *ProjectCollectionBuilder) deleteConfiguredProject(project dirty.Value[*
 	}
 	b.configFileRegistryBuilder.releaseConfigForProject(projectPath, projectPath)
 	project.Delete()
+}
+
+// releaseDroppedProjectReferences releases the config entries for project references
+// that were present in oldProgram but are no longer referenced by newProgram. Creating
+// newProgram already re-acquires the config for every reference it still resolves, so
+// only the dropped references need to be released here.
+func (b *ProjectCollectionBuilder) releaseDroppedProjectReferences(oldProgram *compiler.Program, newProgram *compiler.Program, projectPath tspath.Path) {
+	if oldProgram == nil || oldProgram == newProgram {
+		return
+	}
+	var newReferences collections.Set[tspath.Path]
+	if newProgram != nil {
+		newProgram.RangeResolvedProjectReference(func(referencePath tspath.Path, _ *tsoptions.ParsedCommandLine, _ *tsoptions.ParsedCommandLine, _ int) bool {
+			newReferences.Add(referencePath)
+			return true
+		})
+	}
+	oldProgram.RangeResolvedProjectReference(func(referencePath tspath.Path, _ *tsoptions.ParsedCommandLine, _ *tsoptions.ParsedCommandLine, _ int) bool {
+		if !newReferences.Has(referencePath) {
+			b.configFileRegistryBuilder.releaseConfigForProject(referencePath, projectPath)
+		}
+		return true
+	})
 }

@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+	"unsafe"
 
 	"github.com/microsoft/typescript-go/internal/stringutil"
 )
@@ -41,6 +43,12 @@ func IsRootedDiskPath(path string) bool {
 func IsDiskPathRoot(path string) bool {
 	rootLength := GetEncodedRootLength(path)
 	return rootLength > 0 && rootLength == len(path)
+}
+
+// IsDynamicFileName returns true if the file name represents a dynamic/virtual file
+// that doesn't exist on disk (e.g., untitled files with paths like "^/untitled/...").
+func IsDynamicFileName(fileName string) bool {
+	return strings.HasPrefix(fileName, "^/")
 }
 
 // Determines whether a path starts with an absolute path component (i.e. `/`, `c:/`, `file://`, etc.).
@@ -331,7 +339,56 @@ func ResolveTripleslashReference(moduleName string, containingFile string) strin
 }
 
 func GetNormalizedPathComponents(path string, currentDirectory string) []string {
-	return reducePathComponents(GetPathComponents(path, currentDirectory))
+	combined := CombinePaths(currentDirectory, path)
+	return getNormalizedPathComponentsFromCombined(combined)
+}
+
+func getNormalizedPathComponentsFromCombined(path string) []string {
+	rootLength := GetRootLength(path)
+	// Always include the root component (empty string for relative paths).
+	components := make([]string, 1, 8)
+	components[0] = path[:rootLength]
+
+	for i := rootLength; i < len(path); {
+		// Skip directory separators (handles consecutive separators and trailing '/').
+		for i < len(path) && path[i] == '/' {
+			i++
+		}
+		if i >= len(path) {
+			break
+		}
+
+		start := i
+		for i < len(path) && path[i] != '/' {
+			i++
+		}
+		component := path[start:i]
+
+		if component == "" || component == "." {
+			continue
+		}
+		if component == ".." {
+			if len(components) > 1 {
+				if components[len(components)-1] != ".." {
+					components = components[:len(components)-1]
+					continue
+				}
+			} else if components[0] != "" {
+				// If this is an absolute path, we can't go above the root.
+				continue
+			}
+		}
+
+		components = append(components, component)
+	}
+
+	return components
+}
+
+func GetNormalizedAbsolutePathWithoutRoot(fileName string, currentDirectory string) string {
+	absolutePath := GetNormalizedAbsolutePath(fileName, currentDirectory)
+	rootLength := GetRootLength(absolutePath)
+	return absolutePath[rootLength:]
 }
 
 func GetNormalizedAbsolutePath(fileName string, currentDirectory string) string {
@@ -559,6 +616,41 @@ func GetCanonicalFileName(fileName string, useCaseSensitiveFileNames bool) strin
 	return ToFileNameLowerCase(fileName)
 }
 
+// TrimFilePathPrefix removes prefix from the start of path, honoring
+// useCaseSensitiveFileNames the same way GetCanonicalFileName does. It returns
+// the remainder of path and true if path starts with prefix; otherwise it
+// returns path unchanged and false.
+//
+// This must not slice path using len(prefix): case-folding (as performed by
+// GetCanonicalFileName) can change a string's UTF-8 byte length without
+// changing its rune count (e.g. the Kelvin sign '\u212A' case-folds to the
+// single-byte 'k'), so path and prefix can disagree in byte length even when
+// one is (a case-insensitive match for) a prefix of the other.
+func TrimFilePathPrefix(path string, prefix string, useCaseSensitiveFileNames bool) (string, bool) {
+	if useCaseSensitiveFileNames {
+		return strings.CutPrefix(path, prefix)
+	}
+	canonicalPrefix := GetCanonicalFileName(prefix, false /*useCaseSensitiveFileNames*/)
+	if !strings.HasPrefix(GetCanonicalFileName(path, false /*useCaseSensitiveFileNames*/), canonicalPrefix) {
+		return path, false
+	}
+	return trimRuneCount(path, utf8.RuneCountInString(canonicalPrefix)), true
+}
+
+// trimRuneCount returns the suffix of s after skipping up to runeCount runes,
+// clamping to the end of s if it has fewer runes than runeCount.
+func trimRuneCount(s string, runeCount int) string {
+	i := 0
+	for range runeCount {
+		if i >= len(s) {
+			break
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+	}
+	return s[i:]
+}
+
 // We convert the file names to lower case as key for file name on case insensitive file system
 // While doing so we need to handle special characters (eg \u0130) to ensure that we dont convert
 // it to lower case, fileName with its lowercase form can exist along side it.
@@ -607,7 +699,17 @@ func ToFileNameLowerCase(fileName string) string {
 			}
 			b[i] = c
 		}
-		return string(b)
+		// SAFETY: We construct a string that aliases b’s backing array without copying.
+		// (1) Lifetime: The address of b’s elements escapes via the returned string,
+		//     so escape analysis allocates b’s backing array on the heap. The string
+		//     header points to that heap allocation, ensuring it remains live for the
+		//     string’s lifetime.
+		// (2) Initialization: We assign to every b[i] before creating the string.
+		//     (Note: Go zeroes all allocated memory, so “uninitialized” bytes cannot occur.)
+		// (3) Immutability: We do not modify b after this point, so the string view
+		//     observes immutable data.
+		// (4) Non-empty: On this path len(b) > 0, so &b[0] is a valid, non-nil pointer.
+		return unsafe.String(&b[0], len(b))
 	}
 
 	return strings.Map(func(r rune) rune {
@@ -812,6 +914,20 @@ func GetAnyExtensionFromPath(path string, extensions []string, ignoreCase bool) 
 	return ""
 }
 
+func GetLongestExtensionFromPath(path string, extensions []string, ignoreCase bool) string {
+	path = RemoveTrailingDirectorySeparator(path)
+	comparer := stringutil.GetStringEqualityComparer(ignoreCase)
+	longest := ""
+	for _, extension := range extensions {
+		if len(extension) > len(longest) {
+			if matched := tryGetExtensionFromPath(path, extension, comparer); matched != "" {
+				longest = matched
+			}
+		}
+	}
+	return longest
+}
+
 func getAnyExtensionFromPathWorker(path string, extensions []string, stringEqualityComparer func(a, b string) bool) string {
 	for _, extension := range extensions {
 		result := tryGetExtensionFromPath(path, extension, stringEqualityComparer)
@@ -966,8 +1082,14 @@ func ContainsPath(parent string, child string, options ComparePathsOptions) bool
 	return true
 }
 
+// ContainsPath checks whether child is contained within or equal to p.
+// Since Path values are already rooted, reduced, and case-canonicalized,
+// this is a simple string prefix check.
 func (p Path) ContainsPath(child Path) bool {
-	return ContainsPath(string(p), string(child), ComparePathsOptions{UseCaseSensitiveFileNames: true})
+	if len(p) == 0 {
+		return false
+	}
+	return p == child || len(child) > len(p) && strings.HasPrefix(string(child), string(p)) && (p[len(p)-1] == '/' || child[len(p)] == '/')
 }
 
 func FileExtensionIs(path string, extension string) bool {
@@ -1126,6 +1248,20 @@ func getCommonParentsWorker(componentGroups [][]string, minComponents int, optio
 	}
 
 	return [][]string{componentGroups[0][:maxDepth]}
+}
+
+func StartsWithDirectory(fileName string, directoryName string, useCaseSensitiveFileNames bool) bool {
+	if directoryName == "" {
+		return false
+	}
+
+	canonicalFileName := GetCanonicalFileName(fileName, useCaseSensitiveFileNames)
+	canonicalDirectoryName := GetCanonicalFileName(directoryName, useCaseSensitiveFileNames)
+	canonicalDirectoryName = strings.TrimSuffix(canonicalDirectoryName, "/")
+	canonicalDirectoryName = strings.TrimSuffix(canonicalDirectoryName, "\\")
+
+	return strings.HasPrefix(canonicalFileName, canonicalDirectoryName+"/") ||
+		strings.HasPrefix(canonicalFileName, canonicalDirectoryName+"\\")
 }
 
 func CompareNumberOfDirectorySeparators(path1, path2 string) int {

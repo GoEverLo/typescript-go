@@ -7,14 +7,12 @@ License at http://www.apache.org/licenses/LICENSE-2.0
 THIS CODE IS PROVIDED ON AN *AS IS* BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 KIND, EITHER EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION ANY IMPLIED
 WARRANTIES OR CONDITIONS OF TITLE, FITNESS FOR A PARTICULAR PURPOSE,
-MERCHANTABLITY OR NON-INFRINGEMENT.
+MERCHANTABILITY OR NON-INFRINGEMENT.
 
 See the Apache Version 2.0 License for specific language governing permissions
 and limitations under the License.
 ***************************************************************************** */
 
-
-/// <reference no-default-lib="true"/>
 
 /// <reference lib="es2018.intl" />
 declare namespace Intl {
@@ -171,15 +169,15 @@ declare namespace Intl {
         format(value: number, unit: RelativeTimeFormatUnit): string;
 
         /**
-         *  Returns an array of objects representing the relative time format in parts that can be used for custom locale-aware formatting.
+         * Returns an array of objects representing the relative time format in parts that can be used for custom locale-aware formatting.
          *
-         *  @param value - Numeric value to use in the internationalized relative time message
+         * @param value - Numeric value to use in the internationalized relative time message
          *
-         *  @param unit - [Unit](https://tc39.es/ecma402/#sec-singularrelativetimeunit) to use in the relative time internationalized message.
+         * @param unit - [Unit](https://tc39.es/ecma402/#sec-singularrelativetimeunit) to use in the relative time internationalized message.
          *
-         *  @throws `RangeError` if `unit` was given something other than `unit` possible values
+         * @throws `RangeError` if `unit` was given something other than `unit` possible values
          *
-         *  [MDN](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Intl/RelativeTimeFormat/formatToParts).
+         * [MDN](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Intl/RelativeTimeFormat/formatToParts).
          */
         formatToParts(value: number, unit: RelativeTimeFormatUnit): RelativeTimeFormatPart[];
 
@@ -467,7 +465,6 @@ declare namespace Intl {
 
     interface PluralRulesConstructor {
         new (locales?: LocalesArgument, options?: PluralRulesOptions): PluralRules;
-        (locales?: LocalesArgument, options?: PluralRulesOptions): PluralRules;
 
         supportedLocalesOf(locales: LocalesArgument, options?: { localeMatcher?: "lookup" | "best fit"; }): string[];
     }

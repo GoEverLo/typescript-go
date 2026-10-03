@@ -15,9 +15,14 @@ import (
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
 
-func snapshotToBuildInfo(snapshot *snapshot, program *compiler.Program, buildInfoFileName string) *BuildInfo {
+func snapshotToBuildInfo(snapshot *snapshot, program *compiler.Program, buildInfoFileName string) (*BuildInfo, error) {
+	contentMapperIdentities, err := ContentMapperIdentities(program.ContentMapperProject())
+	if err != nil {
+		return nil, err
+	}
 	buildInfo := &BuildInfo{
-		Version: core.Version(),
+		Version:                 core.Version(),
+		ContentMapperIdentities: contentMapperIdentities,
 	}
 	to := &toBuildInfo{
 		snapshot:           snapshot,
@@ -52,7 +57,8 @@ func snapshotToBuildInfo(snapshot *snapshot, program *compiler.Program, buildInf
 	buildInfo.Errors = snapshot.hasErrors.IsTrue()
 	buildInfo.SemanticErrors = snapshot.hasSemanticErrors
 	buildInfo.CheckPending = snapshot.checkPending
-	return buildInfo
+	to.setPackageJsons()
+	return buildInfo, nil
 }
 
 type toBuildInfo struct {
@@ -128,6 +134,8 @@ func (t *toBuildInfo) toBuildInfoDiagnosticsFromFileNameDiagnostics(diagnostics 
 			End:                d.end,
 			Code:               d.code,
 			Category:           d.category,
+			Source:             d.source,
+			MessageText:        d.messageText,
 			MessageKey:         d.messageKey,
 			MessageArgs:        d.messageArgs,
 			MessageChain:       t.toBuildInfoDiagnosticsFromFileNameDiagnostics(d.messageChain),
@@ -135,6 +143,7 @@ func (t *toBuildInfo) toBuildInfoDiagnosticsFromFileNameDiagnostics(diagnostics 
 			ReportsUnnecessary: d.reportsUnnecessary,
 			ReportsDeprecated:  d.reportsDeprecated,
 			SkippedOnNoEmit:    d.skippedOnNoEmit,
+			RepopulateInfo:     toBuildInfoRepopulateInfo(d.repopulateInfo),
 		}
 	})
 }
@@ -155,6 +164,8 @@ func (t *toBuildInfo) toBuildInfoDiagnosticsFromDiagnostics(filePath tspath.Path
 			End:                d.Loc().End(),
 			Code:               d.Code(),
 			Category:           d.Category(),
+			Source:             d.Source(),
+			MessageText:        d.MessageText(),
 			MessageKey:         d.MessageKey(),
 			MessageArgs:        d.MessageArgs(),
 			MessageChain:       t.toBuildInfoDiagnosticsFromDiagnostics(filePath, d.MessageChain()),
@@ -162,8 +173,21 @@ func (t *toBuildInfo) toBuildInfoDiagnosticsFromDiagnostics(filePath tspath.Path
 			ReportsUnnecessary: d.ReportsUnnecessary(),
 			ReportsDeprecated:  d.ReportsDeprecated(),
 			SkippedOnNoEmit:    d.SkippedOnNoEmit(),
+			RepopulateInfo:     toBuildInfoRepopulateInfo(d.RepopulateInfo()),
 		}
 	})
+}
+
+func toBuildInfoRepopulateInfo(info *ast.RepopulateDiagnosticInfo) *BuildInfoRepopulateInfo {
+	if info == nil {
+		return nil
+	}
+	return &BuildInfoRepopulateInfo{
+		Kind:            info.Kind,
+		ModuleReference: info.ModuleReference,
+		Mode:            info.Mode,
+		PackageName:     info.PackageName,
+	}
 }
 
 func (t *toBuildInfo) toBuildInfoDiagnosticsOfFile(filePath tspath.Path, diags *DiagnosticsOrBuildInfoDiagnosticsWithFileName) *BuildInfoDiagnosticsOfFile {
@@ -197,7 +221,7 @@ func (t *toBuildInfo) collectRootFiles() {
 }
 
 func (t *toBuildInfo) setFileInfoAndEmitSignatures() {
-	t.buildInfo.FileInfos = core.MapNonNil(t.program.GetSourceFiles(), func(file *ast.SourceFile) *BuildInfoFileInfo {
+	t.buildInfo.FileInfos = core.Map(t.program.GetSourceFiles(), func(file *ast.SourceFile) *BuildInfoFileInfo {
 		info, _ := t.snapshot.fileInfos.Load(file.Path())
 		fileId := t.toFileId(file.Path())
 		//  tryAddRoot(key, fileId);
@@ -206,11 +230,6 @@ func (t *toBuildInfo) setFileInfoAndEmitSignatures() {
 				panic(fmt.Sprintf("File name at index %d does not match expected relative path or libName: %s != %s", fileId-1, t.buildInfo.FileNames[fileId-1], t.relativeToBuildInfo(string(file.Path()))))
 			}
 		}
-		if int(fileId) != len(t.buildInfo.FileNames) {
-			// Duplicate - for now ignore
-			return nil
-		}
-
 		if t.snapshot.options.Composite.IsTrue() {
 			if !ast.IsJsonSourceFile(file) && t.program.SourceFileMayBeEmitted(file, false) {
 				if emitSignature, loaded := t.snapshot.emitSignatures.Load(file.Path()); !loaded {
@@ -235,9 +254,6 @@ func (t *toBuildInfo) setFileInfoAndEmitSignatures() {
 		}
 		return newBuildInfoFileInfo(info)
 	})
-	if t.buildInfo.FileInfos == nil {
-		t.buildInfo.FileInfos = []*BuildInfoFileInfo{}
-	}
 }
 
 func (t *toBuildInfo) setRootOfIncrementalProgram() {
@@ -362,4 +378,13 @@ func (t *toBuildInfo) setRootOfNonIncrementalProgram() {
 			NonIncremental: t.relativeToBuildInfo(string(tspath.ToPath(fileName, t.comparePathsOptions.CurrentDirectory, t.comparePathsOptions.UseCaseSensitiveFileNames))),
 		}
 	})
+}
+
+func (t *toBuildInfo) setPackageJsons() {
+	if len(t.snapshot.packageJsons) > 0 {
+		t.buildInfo.PackageJsons = core.Map(t.snapshot.packageJsons, t.relativeToBuildInfo)
+	}
+	if len(t.snapshot.missingPackageJsons) > 0 {
+		t.buildInfo.MissingPackageJsons = core.Map(t.snapshot.missingPackageJsons, t.relativeToBuildInfo)
+	}
 }

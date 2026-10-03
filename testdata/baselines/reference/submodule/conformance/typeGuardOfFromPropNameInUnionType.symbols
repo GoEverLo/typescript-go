@@ -17,7 +17,7 @@ class C { b: Object; }
 class D { a: Date; }
 >D : Symbol(D, Decl(typeGuardOfFromPropNameInUnionType.ts, 2, 22))
 >a : Symbol(D.a, Decl(typeGuardOfFromPropNameInUnionType.ts, 3, 9))
->Date : Symbol(Date, Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.scripthost.d.ts, --, --))
+>Date : Symbol(Date, Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.scripthost.d.ts, --, --), Decl(lib.es2015.symbol.wellknown.d.ts, --, --))
 
 function namedClasses(x: A | B) {
 >namedClasses : Symbol(namedClasses, Decl(typeGuardOfFromPropNameInUnionType.ts, 3, 20))
@@ -54,7 +54,7 @@ function multipleClasses(x: A | B | C | D) {
 
         let y: string | Date = x.a;
 >y : Symbol(y, Decl(typeGuardOfFromPropNameInUnionType.ts, 15, 11))
->Date : Symbol(Date, Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.scripthost.d.ts, --, --))
+>Date : Symbol(Date, Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.es5.d.ts, --, --), Decl(lib.scripthost.d.ts, --, --), Decl(lib.es2015.symbol.wellknown.d.ts, --, --))
 >x.a : Symbol(a, Decl(typeGuardOfFromPropNameInUnionType.ts, 0, 9), Decl(typeGuardOfFromPropNameInUnionType.ts, 3, 9))
 >x : Symbol(x, Decl(typeGuardOfFromPropNameInUnionType.ts, 13, 25))
 >a : Symbol(a, Decl(typeGuardOfFromPropNameInUnionType.ts, 0, 9), Decl(typeGuardOfFromPropNameInUnionType.ts, 3, 9))
@@ -308,22 +308,22 @@ function f(i: Indexed) {
 >i : Symbol(i, Decl(typeGuardOfFromPropNameInUnionType.ts, 96, 11))
 
         return i.a;
->i.a : Symbol(Indexed[__index], Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
+>i.a : Symbol(Indexed.__index, Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
 >i : Symbol(i, Decl(typeGuardOfFromPropNameInUnionType.ts, 96, 11))
->a : Symbol(Indexed[__index], Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
+>a : Symbol(Indexed.__index, Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
     }
     else if ("b" in i) {
 >i : Symbol(i, Decl(typeGuardOfFromPropNameInUnionType.ts, 96, 11))
 
         return i.b;
->i.b : Symbol(Indexed[__index], Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
+>i.b : Symbol(Indexed.__index, Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
 >i : Symbol(i, Decl(typeGuardOfFromPropNameInUnionType.ts, 96, 11))
->b : Symbol(Indexed[__index], Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
+>b : Symbol(Indexed.__index, Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
     }
     return "c" in i && i.c;
 >i : Symbol(i, Decl(typeGuardOfFromPropNameInUnionType.ts, 96, 11))
->i.c : Symbol(Indexed[__index], Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
+>i.c : Symbol(Indexed.__index, Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
 >i : Symbol(i, Decl(typeGuardOfFromPropNameInUnionType.ts, 96, 11))
->c : Symbol(Indexed[__index], Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
+>c : Symbol(Indexed.__index, Decl(typeGuardOfFromPropNameInUnionType.ts, 92, 19))
 }
 

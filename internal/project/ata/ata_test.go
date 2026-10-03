@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/bundled"
+	"github.com/microsoft/typescript-go/internal/ls/lsutil"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
+	"github.com/microsoft/typescript-go/internal/project"
 	"github.com/microsoft/typescript-go/internal/testutil/projecttestutil"
 	"gotest.tools/v3/assert"
 )
@@ -376,7 +378,6 @@ func TestATA(t *testing.T) {
 		assert.NilError(t, utils.FS().WriteFile(
 			"/user/username/projects/project/package.json",
 			`{ "dependencies": { "commander": "0.0.2" } }`,
-			false,
 		))
 		session.DidChangeWatchedFiles(context.Background(), []*lsproto.FileEvent{{
 			Type: lsproto.FileChangeTypeChanged,
@@ -617,5 +618,150 @@ func TestATA(t *testing.T) {
 		assert.Assert(t, commanderTypesFile != nil, "commander types should be installed")
 		emberComponentTypesFile := program.GetSourceFile(projecttestutil.TestTypingsLocation + "/node_modules/@types/ember__component/index.d.ts")
 		assert.Assert(t, emberComponentTypesFile != nil, "ember__component types should be installed")
+	})
+
+	// Test that ATA works correctly when `WatchEnabled` is false but `TypingsLocation` is set.
+	// Previously if `WatchEnabled` was false but `TypingsLocation` was set, ATA would run but
+	// crash when cloning file-watcher data for a new snapshot.
+	t.Run("ATA with WatchEnabled false should not panic", func(t *testing.T) {
+		t.Parallel()
+
+		files := map[string]any{
+			"/user/username/projects/project/app.js": ``,
+			"/user/username/projects/project/package.json": `{
+				"name": "test",
+				"dependencies": {
+					"jquery": "^3.1.0"
+				}
+			}`,
+		}
+
+		session, utils := projecttestutil.SetupWithOptionsAndTypingsInstaller(files, &project.SessionOptions{
+			CurrentDirectory:   "/",
+			DefaultLibraryPath: bundled.LibPath(),
+			TypingsLocation:    projecttestutil.TestTypingsLocation,
+			PositionEncoding:   lsproto.PositionEncodingKindUTF8,
+			WatchEnabled:       false,
+			LoggingEnabled:     true,
+		}, &projecttestutil.TypingsInstallerOptions{
+			PackageToFile: map[string]string{
+				"jquery": `declare const $: { x: number }`,
+			},
+		})
+
+		// Open a file to trigger project creation and ATA.
+		session.DidOpenFile(context.Background(), lsproto.DocumentUri("file:///user/username/projects/project/app.js"), 1, files["/user/username/projects/project/app.js"].(string), lsproto.LanguageKindJavaScript)
+		session.WaitForBackgroundTasks()
+
+		// ATA should have run
+		calls := utils.NpmExecutor().NpmInstallCalls()
+		assert.Equal(t, 2, len(calls), "Expected exactly 2 npm install calls")
+
+		// Getting the language service should not panic after
+		// applying ATA changes and grabbing the latest snapshot.
+		ls, err := session.GetLanguageService(context.Background(), lsproto.DocumentUri("file:///user/username/projects/project/app.js"))
+		assert.NilError(t, err)
+		assert.Assert(t, ls != nil)
+	})
+
+	ataDisabledCases := []struct {
+		name   string
+		config map[string]any
+	}{
+		{
+			name: "unified setting",
+			config: map[string]any{
+				"js/ts": map[string]any{
+					"tsserver": map[string]any{
+						"automaticTypeAcquisition": map[string]any{
+							"enabled": false,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "deprecated setting",
+			config: map[string]any{
+				"typescript": map[string]any{
+					"disableAutomaticTypeAcquisition": true,
+				},
+			},
+		},
+	}
+
+	for _, tc := range ataDisabledCases {
+		t.Run("ATA disabled via "+tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			files := map[string]any{
+				"/user/username/projects/project/app.js": ``,
+				"/user/username/projects/project/package.json": `{
+					"name": "test",
+					"dependencies": {
+						"jquery": "^3.1.0"
+					}
+				}`,
+			}
+
+			session, utils := projecttestutil.SetupWithTypingsInstaller(files, &projecttestutil.TypingsInstallerOptions{
+				PackageToFile: map[string]string{
+					"jquery": `declare const $: { x: number }`,
+				},
+			})
+
+			session.Configure(lsutil.ParseUserPreferences(tc.config))
+			session.DidOpenFile(context.Background(), lsproto.DocumentUri("file:///user/username/projects/project/app.js"), 1, files["/user/username/projects/project/app.js"].(string), lsproto.LanguageKindJavaScript)
+			session.WaitForBackgroundTasks()
+
+			calls := utils.NpmExecutor().NpmInstallCalls()
+			assert.Equal(t, 0, len(calls), "Expected no npm install calls when ATA is disabled via "+tc.name)
+		})
+	}
+
+	t.Run("ATA re-enabled after being disabled triggers diagnostics refresh", func(t *testing.T) {
+		t.Parallel()
+
+		files := map[string]any{
+			"/user/username/projects/project/app.js": ``,
+			"/user/username/projects/project/package.json": `{
+				"name": "test",
+				"dependencies": {
+					"jquery": "^3.1.0"
+				}
+			}`,
+		}
+
+		session, utils := projecttestutil.SetupWithTypingsInstaller(files, &projecttestutil.TypingsInstallerOptions{
+			PackageToFile: map[string]string{
+				"jquery": `declare const $: { x: number }`,
+			},
+		})
+
+		// Disable ATA
+		session.Configure(lsutil.ParseUserPreferences(map[string]any{
+			"js/ts": map[string]any{
+				"tsserver": map[string]any{
+					"automaticTypeAcquisition": map[string]any{
+						"enabled": false,
+					},
+				},
+			},
+		}))
+
+		session.DidOpenFile(context.Background(), lsproto.DocumentUri("file:///user/username/projects/project/app.js"), 1, files["/user/username/projects/project/app.js"].(string), lsproto.LanguageKindJavaScript)
+		session.WaitForBackgroundTasks()
+
+		calls := utils.NpmExecutor().NpmInstallCalls()
+		assert.Equal(t, 0, len(calls), "Expected no npm install calls when ATA is disabled")
+
+		baselineRefreshCount := len(utils.Client().RefreshDiagnosticsCalls())
+
+		// Re-enable ATA
+		session.Configure(lsutil.ParseUserPreferences(map[string]any{}))
+		session.WaitForBackgroundTasks()
+
+		refreshCount := len(utils.Client().RefreshDiagnosticsCalls())
+		assert.Assert(t, refreshCount > baselineRefreshCount, "Expected RefreshDiagnostics call after ATA re-enabled")
 	})
 }

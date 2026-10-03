@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/go-json-experiment/json"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/json"
 	"github.com/microsoft/typescript-go/internal/module"
 	"github.com/microsoft/typescript-go/internal/project/logging"
 	"github.com/microsoft/typescript-go/internal/semver"
@@ -186,7 +186,7 @@ func (ti *TypingsInstaller) installTypings(
 	if packageNames, ok := ti.installWorker(projectID, requestID, scopedTypings, logger); ok {
 		logger.Log(fmt.Sprintf("ATA:: Installed typings %v", packageNames))
 		var installedTypingFiles []string
-		resolver := module.NewResolver(ti.host, &core.CompilerOptions{ModuleResolution: core.ModuleResolutionKindNodeNext}, "", "")
+		resolver := module.NewResolver(ti.host, &core.CompilerOptions{ModuleResolution: core.ModuleResolutionKindNodeNext}, "", "", nil)
 		for _, packageName := range filteredTypings {
 			typingFile := ti.typingToFileName(resolver, packageName)
 			if typingFile == "" {
@@ -406,7 +406,7 @@ func (ti *TypingsInstaller) processCacheLocation(projectID string, fs vfs.FS, lo
 	packageJson := tspath.CombinePaths(ti.typingsLocation, "package.json")
 	packageLockJson := tspath.CombinePaths(ti.typingsLocation, "package-lock.json")
 	logger.Log("ATA:: Trying to find '" + packageJson + "'...")
-	if fs.FileExists(packageJson) && fs.FileExists((packageLockJson)) {
+	if fs.FileExists(packageJson) && fs.FileExists(packageLockJson) {
 		var npmConfig npmConfig
 		npmConfigContents := parseNpmConfigOrLock(fs, logger, packageJson, &npmConfig)
 		var npmLock npmLock
@@ -416,7 +416,7 @@ func (ti *TypingsInstaller) processCacheLocation(projectID string, fs vfs.FS, lo
 		logger.Log("ATA:: Loaded content of " + packageLockJson + ": " + npmLockContents)
 
 		// !!! sheetal strada uses Node10
-		resolver := module.NewResolver(ti.host, &core.CompilerOptions{ModuleResolution: core.ModuleResolutionKindNodeNext}, "", "")
+		resolver := module.NewResolver(ti.host, &core.CompilerOptions{ModuleResolution: core.ModuleResolutionKindNodeNext}, "", "", nil)
 		if npmConfig.DevDependencies != nil && (npmLock.Packages != nil || npmLock.Dependencies != nil) {
 			for key := range npmConfig.DevDependencies {
 				npmLockValue, npmLockValueExists := npmLock.Packages["node_modules/"+key]
@@ -469,7 +469,7 @@ func (ti *TypingsInstaller) ensureTypingsLocationExists(fs vfs.FS, logger loggin
 
 	if !fs.FileExists(npmConfigPath) {
 		logger.Log(fmt.Sprintf("ATA:: Npm config file: '%s' is missing, creating new one...", npmConfigPath))
-		err := fs.WriteFile(npmConfigPath, "{ \"private\": true }", false)
+		err := fs.WriteFile(npmConfigPath, "{ \"private\": true }")
 		if err != nil {
 			logger.Log(fmt.Sprintf("ATA:: Npm config file write failed: %v", err))
 		}

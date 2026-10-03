@@ -3,9 +3,12 @@ package core
 import "github.com/microsoft/typescript-go/internal/tspath"
 
 type ProjectReference struct {
-	Path         string
-	OriginalPath string
-	Circular     bool
+	// Path is a normalized path on disk.
+	Path string `json:"path"`
+	// OriginalPath is the path as it was originally written.
+	OriginalPath string `json:"originalPath"`
+	// Circular indicates that this reference is intended to form a circularity.
+	Circular bool `json:"circular"`
 }
 
 func ResolveProjectReferencePath(ref *ProjectReference) string {

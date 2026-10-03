@@ -55,6 +55,7 @@ class MainThreadTasks {
 module.exports = MainThreadTasks;
 
 //// [module.js]
+"use strict";
 /** @typedef {'parseHTML'|'styleLayout'} TaskGroupIds */
 /**
  * @typedef TaskGroup
@@ -82,6 +83,7 @@ module.exports = {
     taskNameToGroup,
 };
 //// [index.js]
+"use strict";
 const { taskGroups, taskNameToGroup } = require('./module.js');
 /** @typedef {import('./module.js').TaskGroup} TaskGroup */
 /**
@@ -103,13 +105,7 @@ module.exports = MainThreadTasks;
 
 //// [module.d.ts]
 /** @typedef {'parseHTML'|'styleLayout'} TaskGroupIds */
-export type TaskGroupIds = 'parseHTML' | 'styleLayout';
-export type TaskGroup = {
-    id: TaskGroupIds;
-    label: string;
-    traceEventNames: string[];
-};
-declare const _default: {
+declare const _exports: {
     taskGroups: {
         parseHTML: {
             id: "parseHTML";
@@ -120,10 +116,17 @@ declare const _default: {
             label: string;
         };
     };
-    taskNameToGroup: any;
+    taskNameToGroup: Record<string, TaskGroup>;
 };
-export = _default;
+export = _exports;
+export type TaskGroupIds = 'parseHTML' | 'styleLayout';
+export type TaskGroup = {
+    id: TaskGroupIds;
+    label: string;
+    traceEventNames: string[];
+};
 //// [index.d.ts]
+export = MainThreadTasks;
 export type TaskGroup = import('./module.js').TaskGroup;
 export type TaskNode = {
     children: TaskNode[];
@@ -133,4 +136,18 @@ export type TaskNode = {
 export type PriorTaskData = {
     timers: Map<string, TaskNode>;
 };
-export = MainThreadTasks;
+/** @typedef {import('./module.js').TaskGroup} TaskGroup */
+/**
+ * @typedef TaskNode
+ * @prop {TaskNode[]} children
+ * @prop {TaskNode|undefined} parent
+ * @prop {TaskGroup} group
+ */
+/** @typedef {{timers: Map<string, TaskNode>}} PriorTaskData */
+declare class MainThreadTasks {
+    /**
+     * @param {TaskGroup} x
+     * @param {TaskNode} y
+     */
+    constructor(x: TaskGroup, y: TaskNode);
+}

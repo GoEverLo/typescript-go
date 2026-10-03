@@ -5,7 +5,9 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/microsoft/typescript-go/internal/collections"
@@ -58,7 +60,8 @@ func (d *FSDiffer) BaselineFSwithDiff(baseline io.Writer) {
 			d.addFsEntryDiff(diffs, newEntry, path)
 			continue
 		} else if file.Mode.IsRegular() {
-			newEntry := &DiffEntry{Content: string(file.Data), MTime: file.ModTime, IsWritten: d.WrittenFiles.Has(path)}
+			content := SanitizeInternalSymbolName(string(file.Data))
+			newEntry := &DiffEntry{Content: content, MTime: file.ModTime, IsWritten: d.WrittenFiles.Has(path)}
 			snap[path] = newEntry
 			d.addFsEntryDiff(diffs, newEntry, path)
 		}
@@ -91,6 +94,20 @@ func (d *FSDiffer) BaselineFSwithDiff(baseline io.Writer) {
 	*d.WrittenFiles = collections.SyncSet[string]{} // Reset written files after baseline
 }
 
+var internalSymbolRegex = regexp.MustCompile(`\x{FFFD}@[^@]+@[0-9]+`)
+
+// Replaces internal symbol names of shape \uFFFD@symbolName@123 with \uFFFD@symbolName@<symbolId>
+// // to avoid baselining differences in symbol ids, which can change between runs.
+func SanitizeInternalSymbolName(s string) string {
+	if !strings.Contains(s, "\uFFFD@") {
+		return s
+	}
+	return internalSymbolRegex.ReplaceAllStringFunc(s, func(match string) string {
+		idStart := strings.LastIndex(match, "@")
+		return match[:idStart] + "@<symbolId>"
+	})
+}
+
 func (d *FSDiffer) addFsEntryDiff(diffs map[string]string, newDirContent *DiffEntry, path string) {
 	var oldDirContent *DiffEntry
 	var defaultLibs *collections.SyncSet[string]
@@ -119,4 +136,42 @@ func (d *FSDiffer) addFsEntryDiff(diffs map[string]string, newDirContent *DiffEn
 		// Lib file that was read
 		diffs[path] = "*Lib*\n" + newDirContent.Content
 	}
+}
+
+// FileChange represents a filesystem change detected between snapshots.
+type FileChange struct {
+	Path    string
+	Deleted bool
+}
+
+func (d *FSDiffer) ChangedPaths() []FileChange {
+	if d.serializedDiff == nil {
+		return nil
+	}
+
+	var changes []FileChange
+	oldSnap := d.serializedDiff
+
+	// Check current files against previous snapshot.
+	for path, file := range d.MapFs().Entries() {
+		if file.Mode&fs.ModeSymlink != 0 || !file.Mode.IsRegular() {
+			continue
+		}
+		if old, ok := oldSnap.Snap[path]; !ok {
+			// New file.
+			changes = append(changes, FileChange{Path: path})
+		} else if string(file.Data) != old.Content || file.ModTime != old.MTime {
+			// Modified or touched file.
+			changes = append(changes, FileChange{Path: path})
+		}
+	}
+
+	// Check for deleted files.
+	for path := range oldSnap.Snap {
+		if fileInfo := d.MapFs().GetFileInfo(path); fileInfo == nil {
+			changes = append(changes, FileChange{Path: path, Deleted: true})
+		}
+	}
+
+	return changes
 }

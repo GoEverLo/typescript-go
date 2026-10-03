@@ -27,10 +27,10 @@
 // x.language
 //   ^^^^^^^^
 // | ----------------------------------------------------------------------
-// | ```tsx
-// | (property) language: string
+// | ```typescript
+// | (property) language?: string | undefined
 // | ```
-// | 
+// | A language id, like `typescript`.
 // | ----------------------------------------------------------------------
 [
   {
@@ -46,7 +46,7 @@
     "item": {
       "contents": {
         "kind": "markdown",
-        "value": "```tsx\n(property) language: string\n```\n"
+        "value": "```typescript\n(property) language?: string | undefined\n```\nA language id, like `typescript`."
       },
       "range": {
         "start": {

@@ -49,11 +49,7 @@ declare global {
 //// [declarationEmitRetainsJsdocyComments.js]
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.
-/**
-* comment5
-*/
-someMethod = exports.Foo = exports.foo = void 0;
+exports.someMethod = exports.Foo = exports.foo = void 0;
 /**
  * comment1
  * @param p
@@ -113,11 +109,11 @@ export declare class Foo {
      */
     bar(s: number): void;
 }
-export declare let 
+export declare let { 
 /**
 * comment5
 */
-someMethod: any;
+someMethod }: any;
 declare global {
     interface ExtFunc {
         /**

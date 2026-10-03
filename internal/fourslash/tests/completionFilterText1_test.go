@@ -70,7 +70,8 @@ class Foo8 {
     }
 }
 `
-	f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
 	f.VerifyCompletions(t, "1", &fourslash.CompletionsExpectedList{
 		IsIncomplete: false,
 		ItemDefaults: &fourslash.CompletionsExpectedItemDefaults{
@@ -84,9 +85,9 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:      "#bar",
-					Kind:       PtrTo(lsproto.CompletionItemKindField),
-					SortText:   PtrTo(string(ls.SortTextLocationPriority)),
-					FilterText: PtrTo("bar"),
+					Kind:       new(lsproto.CompletionItemKindField),
+					SortText:   new(string(ls.SortTextLocationPriority)),
+					FilterText: new("bar"),
 				},
 			},
 		},
@@ -100,9 +101,9 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:      "#bar",
-					Kind:       PtrTo(lsproto.CompletionItemKindField),
-					SortText:   PtrTo(string(ls.SortTextLocationPriority)),
-					FilterText: PtrTo("bar"),
+					Kind:       new(lsproto.CompletionItemKindField),
+					SortText:   new(string(ls.SortTextLocationPriority)),
+					FilterText: new("bar"),
 				},
 			},
 		},
@@ -120,8 +121,8 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:    "#bar",
-					Kind:     PtrTo(lsproto.CompletionItemKindField),
-					SortText: PtrTo(string(ls.SortTextLocationPriority)),
+					Kind:     new(lsproto.CompletionItemKindField),
+					SortText: new(string(ls.SortTextLocationPriority)),
 				},
 			},
 		},
@@ -139,8 +140,8 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:    "#bar",
-					Kind:     PtrTo(lsproto.CompletionItemKindField),
-					SortText: PtrTo(string(ls.SortTextLocationPriority)),
+					Kind:     new(lsproto.CompletionItemKindField),
+					SortText: new(string(ls.SortTextLocationPriority)),
 				},
 			},
 		},
@@ -155,9 +156,9 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:      "#bar",
-					Kind:       PtrTo(lsproto.CompletionItemKindField),
-					SortText:   PtrTo(string(ls.SortTextSuggestedClassMembers)),
-					FilterText: PtrTo("bar"),
+					Kind:       new(lsproto.CompletionItemKindField),
+					SortText:   new(string(ls.SortTextSuggestedClassMembers)),
+					FilterText: new("bar"),
 					TextEdit: &lsproto.TextEditOrInsertReplaceEdit{
 						InsertReplaceEdit: &lsproto.InsertReplaceEdit{
 							NewText: "this.#bar",
@@ -178,10 +179,10 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:      "#bar",
-					Kind:       PtrTo(lsproto.CompletionItemKindField),
-					SortText:   PtrTo(string(ls.SortTextSuggestedClassMembers)),
-					FilterText: PtrTo("bar"),
-					InsertText: PtrTo("this.#bar"),
+					Kind:       new(lsproto.CompletionItemKindField),
+					SortText:   new(string(ls.SortTextSuggestedClassMembers)),
+					FilterText: new("bar"),
+					InsertText: new("this.#bar"),
 				},
 			},
 		},
@@ -196,8 +197,8 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:    "#bar",
-					Kind:     PtrTo(lsproto.CompletionItemKindField),
-					SortText: PtrTo(string(ls.SortTextSuggestedClassMembers)),
+					Kind:     new(lsproto.CompletionItemKindField),
+					SortText: new(string(ls.SortTextSuggestedClassMembers)),
 					TextEdit: &lsproto.TextEditOrInsertReplaceEdit{
 						InsertReplaceEdit: &lsproto.InsertReplaceEdit{
 							NewText: "this.#bar",
@@ -219,8 +220,8 @@ class Foo8 {
 			Includes: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:    "#bar",
-					Kind:     PtrTo(lsproto.CompletionItemKindField),
-					SortText: PtrTo(string(ls.SortTextSuggestedClassMembers)),
+					Kind:     new(lsproto.CompletionItemKindField),
+					SortText: new(string(ls.SortTextSuggestedClassMembers)),
 					TextEdit: &lsproto.TextEditOrInsertReplaceEdit{
 						InsertReplaceEdit: &lsproto.InsertReplaceEdit{
 							NewText: "this.#bar",

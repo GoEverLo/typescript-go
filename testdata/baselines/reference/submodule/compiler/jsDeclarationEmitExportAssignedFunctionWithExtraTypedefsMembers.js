@@ -29,8 +29,11 @@ module.exports = function loader(options) { };
  * @typedef Options
  * @property {string} opt
  */
+export = loader;
+/**
+ * @param {Options} options
+ */
+declare function loader(options: Options): void;
 export type Options = {
     opt: string;
 };
-declare const _default: (options: any) => void;
-export = _default;

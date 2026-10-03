@@ -86,14 +86,14 @@ c.Cls = class {
  * @param {number} b
  * @return {string}
  */
-function d(a, b) { return /** @type {*} */ null; }
+function d(a, b) { return /** @type {*} */ (null); }
 /**
  * @template T,U
  * @param {T} a
  * @param {U} b
  * @return {T & U}
  */
-function e(a, b) { return /** @type {*} */ null; }
+function e(a, b) { return /** @type {*} */ (null); }
 /**
  * @template T
  * @param {T} a
@@ -151,7 +151,7 @@ export declare function e<T, U>(a: T, b: U): T & U;
  */
 export declare function f<T>(a: T): T;
 export declare namespace f {
-    var self: typeof f;
+    export { f as self };
 }
 /**
  * @param {{x: string}} a

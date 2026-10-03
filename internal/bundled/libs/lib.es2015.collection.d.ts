@@ -7,16 +7,17 @@ License at http://www.apache.org/licenses/LICENSE-2.0
 THIS CODE IS PROVIDED ON AN *AS IS* BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 KIND, EITHER EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION ANY IMPLIED
 WARRANTIES OR CONDITIONS OF TITLE, FITNESS FOR A PARTICULAR PURPOSE,
-MERCHANTABLITY OR NON-INFRINGEMENT.
+MERCHANTABILITY OR NON-INFRINGEMENT.
 
 See the Apache Version 2.0 License for specific language governing permissions
 and limitations under the License.
 ***************************************************************************** */
 
 
-/// <reference no-default-lib="true"/>
-
 interface Map<K, V> {
+    /**
+     * Removes all elements from the Map.
+     */
     clear(): void;
     /**
      * @returns true if an element in the Map existed and has been removed, or false if the element does not exist.
@@ -91,7 +92,9 @@ interface Set<T> {
      * Appends a new element with a specified value to the end of the Set.
      */
     add(value: T): this;
-
+    /**
+     * Removes all elements from the Set.
+     */
     clear(): void;
     /**
      * Removes a specified value from the Set.
@@ -107,7 +110,7 @@ interface Set<T> {
      */
     has(value: T): boolean;
     /**
-     * @returns the number of (unique) elements in Set.
+     * @returns the number of (unique) elements in the Set.
      */
     readonly size: number;
 }
@@ -119,8 +122,17 @@ interface SetConstructor {
 declare var Set: SetConstructor;
 
 interface ReadonlySet<T> {
+    /**
+     * Executes a provided function once per each value in the ReadonlySet object, in insertion order.
+     */
     forEach(callbackfn: (value: T, value2: T, set: ReadonlySet<T>) => void, thisArg?: any): void;
+    /**
+     * @returns a boolean indicating whether an element with the specified value exists in the Set or not.
+     */
     has(value: T): boolean;
+    /**
+     * @returns the number of (unique) elements in the Set.
+     */
     readonly size: number;
 }
 

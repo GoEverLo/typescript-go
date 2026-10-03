@@ -27,6 +27,7 @@ const test = (base) => {
 
 
 //// [base.js]
+"use strict";
 class Base {
     constructor() { }
 }
@@ -36,6 +37,7 @@ const BaseFactory = () => {
 BaseFactory.Base = Base;
 module.exports = BaseFactory;
 //// [file.js]
+"use strict";
 /** @typedef {typeof import('./base')} BaseFactory */
 /**
  *
@@ -48,14 +50,14 @@ const test = (base) => {
 
 
 //// [base.d.ts]
+export = BaseFactory;
 declare class Base {
     constructor();
 }
 declare function BaseFactory(): Base;
 declare namespace BaseFactory {
-    var Base: typeof Base;
+    export { Base };
 }
-export = BaseFactory;
 //// [file.d.ts]
 /** @typedef {typeof import('./base')} BaseFactory */
 type BaseFactory = typeof import('./base');
@@ -64,4 +66,4 @@ type BaseFactory = typeof import('./base');
  * @param {InstanceType<BaseFactory["Base"]>} base
  * @returns {InstanceType<BaseFactory["Base"]>}
  */
-declare const test: (base: {}) => {};
+declare const test: (base: InstanceType<BaseFactory["Base"]>) => InstanceType<BaseFactory["Base"]>;

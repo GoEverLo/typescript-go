@@ -1,14 +1,18 @@
 package project
 
 import (
+	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/contentmapper"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/ls"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/project/ata"
 	"github.com/microsoft/typescript-go/internal/project/logging"
@@ -22,7 +26,7 @@ const (
 )
 
 //go:generate go tool golang.org/x/tools/cmd/stringer -type=Kind -trimprefix=Kind -output=project_stringer_generated.go
-//go:generate go tool mvdan.cc/gofumpt -w project_stringer_generated.go
+//go:generate npx dprint fmt project_stringer_generated.go
 
 type Kind int
 
@@ -72,12 +76,12 @@ type Project struct {
 	// Only set before actually loading config file to get actual project references
 	potentialProjectReferences *collections.Set[tspath.Path]
 
-	programFilesWatch       *WatchedFiles[PatternsAndIgnored]
-	failedLookupsWatch      *WatchedFiles[map[tspath.Path]string]
-	affectingLocationsWatch *WatchedFiles[map[tspath.Path]string]
-	typingsWatch            *WatchedFiles[PatternsAndIgnored]
+	programFilesWatch         *WatchedFiles[*collections.SyncSet[tspath.Path]]
+	typingsWatch              *WatchedFiles[PatternsAndIgnored]
+	contentMapperWatch        *WatchedFiles[[]string]
+	contentMapperWatchedFiles *collections.Set[tspath.Path]
 
-	checkerPool *CheckerPool
+	checkerPool *checkerPool
 
 	// installedTypingsInfo is the value of `project.ComputeTypingsInfo()` that was
 	// used during the most recently completed typings installation.
@@ -85,6 +89,8 @@ type Project struct {
 	// typingsFiles are the root files added by the typings installer.
 	typingsFiles []string
 }
+
+var _ ls.Project = (*Project)(nil)
 
 func NewConfiguredProject(
 	configFileName string,
@@ -99,6 +105,7 @@ func NewInferredProject(
 	currentDirectory string,
 	compilerOptions *core.CompilerOptions,
 	rootFileNames []string,
+	contentMappers []*contentmapper.Mapper,
 	builder *ProjectCollectionBuilder,
 	logger *logging.LogTree,
 ) *Project {
@@ -108,26 +115,37 @@ func NewInferredProject(
 			AllowJs:                    core.TSTrue,
 			Module:                     core.ModuleKindESNext,
 			ModuleResolution:           core.ModuleResolutionKindBundler,
-			Target:                     core.ScriptTargetES2022,
+			Target:                     core.ScriptTargetLatestStandard,
 			Jsx:                        core.JsxEmitReactJSX,
 			AllowImportingTsExtensions: core.TSTrue,
 			StrictNullChecks:           core.TSTrue,
 			StrictFunctionTypes:        core.TSTrue,
 			SourceMap:                  core.TSTrue,
-			ESModuleInterop:            core.TSTrue,
 			AllowNonTsExtensions:       core.TSTrue,
 			ResolveJsonModule:          core.TSTrue,
 		}
 	}
-	p.CommandLine = tsoptions.NewParsedCommandLine(
+	p.CommandLine = newInferredProjectCommandLine(
 		compilerOptions,
 		rootFileNames,
+		contentMappers,
 		tspath.ComparePathsOptions{
 			UseCaseSensitiveFileNames: builder.fs.fs.UseCaseSensitiveFileNames(),
 			CurrentDirectory:          currentDirectory,
 		},
 	)
 	return p
+}
+
+func newInferredProjectCommandLine(
+	compilerOptions *core.CompilerOptions,
+	rootFileNames []string,
+	contentMappers []*contentmapper.Mapper,
+	comparePathsOptions tspath.ComparePathsOptions,
+) *tsoptions.ParsedCommandLine {
+	commandLine := tsoptions.NewParsedCommandLine(compilerOptions, rootFileNames, comparePathsOptions)
+	commandLine.ParsedConfig.ContentMappers = contentMappers
+	return commandLine
 }
 
 func NewProject(
@@ -148,35 +166,50 @@ func NewProject(
 	}
 
 	project.configFilePath = tspath.ToPath(configFileName, currentDirectory, builder.fs.fs.UseCaseSensitiveFileNames())
-	if builder.sessionOptions.WatchEnabled {
-		project.programFilesWatch = NewWatchedFiles(
-			"non-root program files for "+configFileName,
+	project.programFilesWatch = NewWatchedFiles(
+		"program files for "+configFileName,
+		lsproto.WatchKindCreate|lsproto.WatchKindChange|lsproto.WatchKindDelete,
+		lsproto.GetClientCapabilities(builder.ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport,
+		createResolutionLookupGlobMapper(builder.sessionOptions.CurrentDirectory, builder.sessionOptions.DefaultLibraryPath, project.currentDirectory, builder.fs.fs.UseCaseSensitiveFileNames()),
+	)
+	if builder.sessionOptions.TypingsLocation != "" {
+		project.typingsWatch = NewWatchedFiles(
+			"typings installer files",
 			lsproto.WatchKindCreate|lsproto.WatchKindChange|lsproto.WatchKindDelete,
+			lsproto.GetClientCapabilities(builder.ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport,
 			core.Identity,
 		)
-		project.failedLookupsWatch = NewWatchedFiles(
-			"failed lookups for "+configFileName,
-			lsproto.WatchKindCreate,
-			createResolutionLookupGlobMapper(builder.sessionOptions.CurrentDirectory, builder.sessionOptions.DefaultLibraryPath, project.currentDirectory, builder.fs.fs.UseCaseSensitiveFileNames()),
-		)
-		project.affectingLocationsWatch = NewWatchedFiles(
-			"affecting locations for "+configFileName,
-			lsproto.WatchKindCreate|lsproto.WatchKindChange|lsproto.WatchKindDelete,
-			createResolutionLookupGlobMapper(builder.sessionOptions.CurrentDirectory, builder.sessionOptions.DefaultLibraryPath, project.currentDirectory, builder.fs.fs.UseCaseSensitiveFileNames()),
-		)
-		if builder.sessionOptions.TypingsLocation != "" {
-			project.typingsWatch = NewWatchedFiles(
-				"typings installer files",
-				lsproto.WatchKindCreate|lsproto.WatchKindChange|lsproto.WatchKindDelete,
-				core.Identity,
-			)
-		}
 	}
+	project.contentMapperWatch = NewWatchedFilesForPaths(
+		"content mapper configuration files for "+configFileName,
+		lsproto.WatchKindCreate|lsproto.WatchKindChange|lsproto.WatchKindDelete,
+		lsproto.GetClientCapabilities(builder.ctx).Workspace.DidChangeWatchedFiles.RelativePatternSupport,
+		builder.sessionOptions.CurrentDirectory,
+		builder.sessionOptions.CurrentDirectory,
+		builder.fs.fs.UseCaseSensitiveFileNames(),
+	)
 	return project
 }
 
 func (p *Project) Name() string {
 	return p.configFileName
+}
+
+// DisplayName returns a short, human-readable name for the project,
+// relative to the given workspace root directory.
+// For configured projects, this is the config file path made relative.
+// For inferred projects, this is the last component of the current directory.
+func (p *Project) DisplayName(cwd string) string {
+	if p.Kind == KindInferred {
+		return tspath.GetBaseFileName(p.currentDirectory)
+	}
+	return tspath.ConvertToRelativePath(p.configFileName, tspath.ComparePathsOptions{
+		CurrentDirectory: cwd,
+	})
+}
+
+func (p *Project) ID() tspath.Path {
+	return p.configFilePath
 }
 
 // ConfigFileName panics if Kind() is not KindConfigured.
@@ -201,6 +234,21 @@ func (p *Project) Id() tspath.Path {
 
 func (p *Project) GetProgram() *compiler.Program {
 	return p.Program
+}
+
+// GetProjectDiagnostics returns program diagnostics combined with any global
+// diagnostics discovered during checking. These are the diagnostics reported on
+// the tsconfig.json file.
+func (p *Project) GetProjectDiagnostics(ctx context.Context) []*ast.Diagnostic {
+	var globalDiags []*ast.Diagnostic
+	if p.checkerPool != nil {
+		globalDiags = p.checkerPool.GetGlobalDiagnostics()
+	}
+	return compiler.SortAndDeduplicateDiagnostics(slices.Concat(
+		p.Program.GetConfigFileParsingDiagnostics(),
+		p.Program.GetProgramDiagnostics(),
+		globalDiags,
+	))
 }
 
 func (p *Project) HasFile(fileName string) bool {
@@ -233,16 +281,32 @@ func (p *Project) Clone() *Project {
 		ProgramLastUpdate:           p.ProgramLastUpdate,
 		potentialProjectReferences:  p.potentialProjectReferences,
 
-		programFilesWatch:       p.programFilesWatch,
-		failedLookupsWatch:      p.failedLookupsWatch,
-		affectingLocationsWatch: p.affectingLocationsWatch,
-		typingsWatch:            p.typingsWatch,
+		programFilesWatch:         p.programFilesWatch,
+		typingsWatch:              p.typingsWatch,
+		contentMapperWatch:        p.contentMapperWatch,
+		contentMapperWatchedFiles: p.contentMapperWatchedFiles,
 
 		checkerPool: p.checkerPool,
 
 		installedTypingsInfo: p.installedTypingsInfo,
 		typingsFiles:         p.typingsFiles,
 	}
+}
+
+// SetCommandLine reassigns the project's command line and resets all state derived
+// from it. Changing the command line always requires a full program rebuild, so the
+// project is marked fully dirty. It also resets:
+//   - the memoized command line augmented with typings files (and its sync.Once, so
+//     the augmented command line is rebuilt from the new command line on next access);
+//   - potentialProjectReferences, the pre-load placeholder derived from the old
+//     command line (always nil for inferred projects, which have no project references).
+func (p *Project) SetCommandLine(commandLine *tsoptions.ParsedCommandLine) {
+	p.CommandLine = commandLine
+	p.commandLineWithTypingsFiles = nil
+	p.commandLineWithTypingsFilesOnce = sync.Once{}
+	p.potentialProjectReferences = nil
+	p.dirty = true
+	p.dirtyFilePath = ""
 }
 
 // getCommandLineWithTypingsFiles returns the command line augmented with typing files if ATA is enabled.
@@ -265,15 +329,7 @@ func (p *Project) getCommandLineWithTypingsFiles() *tsoptions.ParsedCommandLine 
 			newRootNames = append(newRootNames, originalRootNames...)
 			newRootNames = append(newRootNames, p.typingsFiles...)
 
-			// Create a new ParsedCommandLine with the augmented root file names
-			p.commandLineWithTypingsFiles = tsoptions.NewParsedCommandLine(
-				p.CommandLine.CompilerOptions(),
-				newRootNames,
-				tspath.ComparePathsOptions{
-					UseCaseSensitiveFileNames: p.host.FS().UseCaseSensitiveFileNames(),
-					CurrentDirectory:          p.currentDirectory,
-				},
-			)
+			p.commandLineWithTypingsFiles = p.CommandLine.WithFileNames(newRootNames)
 		}
 	})
 	return p.commandLineWithTypingsFiles
@@ -288,16 +344,16 @@ func (p *Project) setPotentialProjectReference(configFilePath tspath.Path) {
 	p.potentialProjectReferences.Add(configFilePath)
 }
 
-func (p *Project) hasPotentialProjectReference(references map[tspath.Path]struct{}) bool {
+func (p *Project) hasPotentialProjectReference(projectTreeRequest *ProjectTreeRequest) bool {
 	if p.CommandLine != nil {
 		for _, path := range p.CommandLine.ResolvedProjectReferencePaths() {
-			if _, has := references[p.toPath(path)]; has {
+			if projectTreeRequest.IsProjectReferenced(p.toPath(path)) {
 				return true
 			}
 		}
 	} else if p.potentialProjectReferences != nil {
 		for path := range p.potentialProjectReferences.Keys() {
-			if _, has := references[path]; has {
+			if projectTreeRequest.IsProjectReferenced(path) {
 				return true
 			}
 		}
@@ -306,30 +362,59 @@ func (p *Project) hasPotentialProjectReference(references map[tspath.Path]struct
 }
 
 type CreateProgramResult struct {
-	Program     *compiler.Program
-	UpdateKind  ProgramUpdateKind
-	CheckerPool *CheckerPool
+	Program    *compiler.Program
+	UpdateKind ProgramUpdateKind
 }
 
 func (p *Project) CreateProgram() CreateProgramResult {
 	updateKind := ProgramUpdateKindNewFiles
 	var programCloned bool
-	var checkerPool *CheckerPool
 	var newProgram *compiler.Program
+
+	// Define a fresh CreateCheckerPool closure for this call. Each invocation of
+	// CreateProgram must use its own closure so that concurrent goroutines cloning
+	// the same project never share a captured variable through a stale closure
+	// stored in the old program's options.
+	createCheckerPool := func(program *compiler.Program) compiler.CheckerPool {
+		return newCheckerPool(p.host.sessionOptions.CheckerPoolOptions, program, p.log)
+	}
 
 	// Create the command line, potentially augmented with typing files
 	commandLine := p.getCommandLineWithTypingsFiles()
-
 	if p.dirtyFilePath != "" && p.Program != nil && p.Program.CommandLine() == commandLine {
-		newProgram, programCloned = p.Program.UpdateProgram(p.dirtyFilePath, p.host)
+		var dirtyFile *ast.SourceFile
+		newProgram, dirtyFile, programCloned = p.Program.UpdateProgram(p.dirtyFilePath, p.host, createCheckerPool)
 		if programCloned {
 			updateKind = ProgramUpdateKindCloned
-			for _, file := range newProgram.GetSourceFiles() {
-				if file.Path() != p.dirtyFilePath {
-					// UpdateProgram only called host.GetSourceFile for the dirty file.
-					// Increment ref count for all other files.
-					p.host.builder.parseCache.Ref(file)
+			for _, file := range newProgram.SourceFiles() {
+				// Use pointer identity: dirtyFile is the exact instance UpdateProgram acquired,
+				// and it is the only file whose refcount is already accounted for.
+				if file != dirtyFile && !file.IsContentMapperFailureStub() && !file.IsContentMapperSupplemental() {
+					// UpdateProgram acquired the changed file only, so we need to ref everything else
+					if file.ContentMapper() != "" {
+						p.host.builder.contentMappedParseCache.Ref(contentMappedParseCacheKeyForFile(file))
+					} else {
+						p.host.builder.parseCache.Ref(parseCacheKeyForFile(file))
+					}
 				}
+			}
+			for _, file := range newProgram.DuplicateSourceFiles() {
+				if !file.IsContentMapperFailureStub {
+					if file.ContentMapper != "" {
+						p.host.builder.contentMappedParseCache.Ref(contentMappedParseCacheKeyForDuplicate(file))
+					} else {
+						p.host.builder.parseCache.Ref(parseCacheKeyForDuplicate(file))
+					}
+				}
+			}
+		} else if dirtyFile != nil {
+			// UpdateProgram always acquires the dirty file before deciding whether it can
+			// reuse the old program. If it falls back to a full rebuild, release that
+			// speculative acquire so the rebuilt program is the only remaining owner.
+			if dirtyFile.ContentMapper() != "" {
+				p.host.builder.contentMappedParseCache.Deref(contentMappedParseCacheKeyForFile(dirtyFile))
+			} else {
+				p.host.builder.parseCache.Deref(parseCacheKeyForFile(dirtyFile))
 			}
 		}
 	} else {
@@ -343,11 +428,7 @@ func (p *Project) CreateProgram() CreateProgramResult {
 				Config:                      commandLine,
 				UseSourceOfProjectReference: true,
 				TypingsLocation:             typingsLocation,
-				JSDocParsingMode:            ast.JSDocParsingModeParseAll,
-				CreateCheckerPool: func(program *compiler.Program) compiler.CheckerPool {
-					checkerPool = newCheckerPool(4, program, p.log)
-					return checkerPool
-				},
+				CreateCheckerPool:           createCheckerPool,
 			},
 		)
 	}
@@ -359,25 +440,13 @@ func (p *Project) CreateProgram() CreateProgramResult {
 	newProgram.BindSourceFiles()
 
 	return CreateProgramResult{
-		Program:     newProgram,
-		UpdateKind:  updateKind,
-		CheckerPool: checkerPool,
+		Program:    newProgram,
+		UpdateKind: updateKind,
 	}
 }
 
-func (p *Project) CloneWatchers(workspaceDir string, libDir string) (programFilesWatch *WatchedFiles[PatternsAndIgnored], failedLookupsWatch *WatchedFiles[map[tspath.Path]string], affectingLocationsWatch *WatchedFiles[map[tspath.Path]string]) {
-	failedLookups := make(map[tspath.Path]string)
-	affectingLocations := make(map[tspath.Path]string)
-	programFiles := getNonRootFileGlobs(workspaceDir, libDir, p.Program.GetSourceFiles(), p.CommandLine.FileNamesByPath(), tspath.ComparePathsOptions{
-		UseCaseSensitiveFileNames: p.host.FS().UseCaseSensitiveFileNames(),
-		CurrentDirectory:          p.currentDirectory,
-	})
-	extractLookups(p.toPath, failedLookups, affectingLocations, p.Program.GetResolvedModules())
-	extractLookups(p.toPath, failedLookups, affectingLocations, p.Program.GetResolvedTypeReferenceDirectives())
-	programFilesWatch = p.programFilesWatch.Clone(programFiles)
-	failedLookupsWatch = p.failedLookupsWatch.Clone(failedLookups)
-	affectingLocationsWatch = p.affectingLocationsWatch.Clone(affectingLocations)
-	return programFilesWatch, failedLookupsWatch, affectingLocationsWatch
+func (p *Project) CloneWatchers() *WatchedFiles[*collections.SyncSet[tspath.Path]] {
+	return p.programFilesWatch.Clone(p.host.sourceFS.seenFiles)
 }
 
 func (p *Project) log(msg string) {
@@ -397,7 +466,9 @@ func (p *Project) print(writeFileNames bool, writeFileExplanation bool, builder 
 		builder.WriteString(fmt.Sprintf("\tFiles (%d)\n", len(sourceFiles)))
 		if writeFileNames {
 			for _, sourceFile := range sourceFiles {
-				builder.WriteString("\t\t" + sourceFile.FileName() + "\n")
+				builder.WriteString("\t\t")
+				builder.WriteString(sourceFile.FileName())
+				builder.WriteString("\n")
 			}
 			// !!!
 			// if writeFileExplanation {}

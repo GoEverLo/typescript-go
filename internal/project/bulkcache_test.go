@@ -52,8 +52,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 			assert.NilError(t, err)
 			assert.Equal(t, ls.GetProgram().Options().Target, core.ScriptTargetES2015)
 
-			snapshotBefore, release := session.Snapshot()
-			defer release()
+			snapshotBefore := session.Snapshot()
 			configBefore := snapshotBefore.ConfigFileRegistry
 
 			// Update tsconfig.json on disk to test that configs don't get reloaded
@@ -64,10 +63,10 @@ func TestBulkCacheInvalidation(t *testing.T) {
 				"types": ["node"]
 			},
 			"include": ["src/**/*"]
-		}`, false)
+		}`)
 			assert.NilError(t, err)
 			// Update fs.d.ts in node_modules
-			err = utils.FS().WriteFile("/project/node_modules/@types/node/fs.d.ts", "new text", false)
+			err = utils.FS().WriteFile("/project/node_modules/@types/node/fs.d.ts", "new text")
 			assert.NilError(t, err)
 
 			// Process the excessive node_modules changes
@@ -77,8 +76,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 			ls, err = session.GetLanguageService(context.Background(), "file:///project/src/index.ts")
 			assert.NilError(t, err)
 
-			snapshotAfter, release := session.Snapshot()
-			defer release()
+			snapshotAfter := session.Snapshot()
 			configAfter := snapshotAfter.ConfigFileRegistry
 
 			// Config should NOT have been reloaded (target should remain ES2015, not esnext)
@@ -139,10 +137,10 @@ func TestBulkCacheInvalidation(t *testing.T) {
 				"types": ["node"]
 			},
 			"include": ["src/**/*"]
-		}`, false)
+		}`)
 			assert.NilError(t, err)
 			// Add root file
-			err = utils.FS().WriteFile("/project/src/rootFile.ts", `console.log("root file")`, false)
+			err = utils.FS().WriteFile("/project/src/rootFile.ts", `console.log("root file")`)
 			assert.NilError(t, err)
 
 			session.DidChangeWatchedFiles(context.Background(), fileEvents)
@@ -183,8 +181,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 		session.DidOpenFile(context.Background(), "file:///project/src/utils/lib.ts", 1, baseFiles["/project/src/utils/lib.ts"].(string), lsproto.LanguageKindTypeScript)
 
 		// Initially, the file should use the root project (strict mode)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		initialProject := snapshot.GetDefaultProject("file:///project/src/utils/lib.ts")
 		assert.Equal(t, initialProject.Name(), "/project/tsconfig.json", "Should initially use root tsconfig")
 
@@ -199,7 +196,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 				"strict": false,
 				"target": "esnext"
 			}
-		}`, false)
+		}`)
 		assert.NilError(t, err)
 
 		// Create excessive changes to trigger bulk invalidation
@@ -212,8 +209,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 		ls, err = session.GetLanguageService(context.Background(), "file:///project/src/utils/lib.ts")
 		assert.NilError(t, err)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		newProject := snapshot.GetDefaultProject("file:///project/src/utils/lib.ts")
 
 		// The file should now use the nested tsconfig
@@ -233,8 +229,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 			// Open file without tsconfig - should create inferred project
 			session.DidOpenFile(context.Background(), "file:///project/src/index.ts", 1, files["/project/src/index.ts"].(string), lsproto.LanguageKindTypeScript)
 
-			snapshot, release := session.Snapshot()
-			defer release()
+			snapshot := session.Snapshot()
 			assert.Assert(t, snapshot.ProjectCollection.InferredProject() != nil, "Should have inferred project")
 			assert.Equal(t, snapshot.GetDefaultProject("file:///project/src/index.ts").Kind, project.KindInferred)
 
@@ -244,7 +239,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 			"strict": true
 		},
 		"include": ["src/**/*"]
-	}`, false)
+	}`)
 			assert.NilError(t, err)
 
 			// Process the changes
@@ -254,8 +249,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 			_, err = session.GetLanguageService(context.Background(), "file:///project/src/index.ts")
 			assert.NilError(t, err)
 
-			snapshot, release = session.Snapshot()
-			defer release()
+			snapshot = session.Snapshot()
 			newProject := snapshot.GetDefaultProject("file:///project/src/index.ts")
 
 			// Check expected behavior
@@ -298,8 +292,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 		// Open file without tsconfig - should create inferred project
 		session.DidOpenFile(context.Background(), "file:///project/src/index.ts", 1, files["/project/src/index.ts"].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, snapshot.GetDefaultProject("file:///project/src/index.ts").Kind, project.KindInferred)
 
 		// Create a tsconfig that would affect this file (simulating a missed creation event)
@@ -309,7 +302,7 @@ func TestBulkCacheInvalidation(t *testing.T) {
 				"strict": true
 			},
 			"include": ["src/**/*"]
-		}`, false)
+		}`)
 		assert.NilError(t, err)
 
 		// Create excessive changes in dist folder only
@@ -320,11 +313,68 @@ func TestBulkCacheInvalidation(t *testing.T) {
 		_, err = session.GetLanguageService(context.Background(), "file:///project/src/index.ts")
 		assert.NilError(t, err)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		newProject := snapshot.GetDefaultProject("file:///project/src/index.ts")
 		assert.Equal(t, newProject.Kind, project.KindInferred, "dist-folder changes should not cause config discovery")
 		// This assertion will fail until we implement logic to ignore dist folder changes
+	})
+
+	// Regression test for https://github.com/microsoft/typescript-go/issues/4545
+	//
+	// A config file entry can be retained (here, by an open file whose default
+	// project search fanned out to a referenced config) while its commandLine is
+	// nil, because the referenced config file does not exist. A bulk cache
+	// invalidation triggered by an excessive number of watch events ranges over
+	// all config entries and used to dereference entry.commandLine.ConfigFile
+	// without a nil check, crashing.
+	//
+	// The nil-check-avoiding short circuit `!ok || text != entry.commandLine...`
+	// only protects the case where the file cannot be read, so the config file
+	// must exist on disk (readable) while the entry's commandLine is still nil to
+	// reach the crash.
+	t.Run("bulk invalidation with retained config whose command line is nil", func(t *testing.T) {
+		t.Parallel()
+		appConfig := `{
+			"compilerOptions": { "composite": true, "target": "esnext" },
+			"include": ["**/*"]
+		}`
+		files := map[string]any{
+			// Solution config references ./app, but app/tsconfig.json does not exist.
+			"/project/tsconfig.json": `{
+				"compilerOptions": { "composite": true },
+				"files": [],
+				"references": [{ "path": "./app" }]
+			}`,
+			"/project/app/main.ts": `export const main = 1;`,
+		}
+
+		session, utils := projecttestutil.Setup(files)
+
+		// Open a file in the (non-existent) referenced project. The default project
+		// search fans out to app/tsconfig.json, creating a retained config entry
+		// with commandLine == nil and pendingReload == None.
+		session.DidOpenFile(context.Background(), "file:///project/app/main.ts", 1, files["/project/app/main.ts"].(string), lsproto.LanguageKindTypeScript)
+		_, err := session.GetLanguageService(context.Background(), "file:///project/app/main.ts")
+		assert.NilError(t, err)
+
+		// Create the referenced config on disk WITHOUT notifying, so the
+		// nil-commandLine entry is not reloaded (pendingReload stays None) but the
+		// file becomes readable.
+		err = utils.FS().WriteFile("/project/app/tsconfig.json", appConfig)
+		assert.NilError(t, err)
+
+		// Trigger a bulk cache invalidation with an excessive number of watch events.
+		// The creation of a config file drives the excessive-change path into
+		// invalidateCache, which ranges over all config entries -- including the one
+		// whose commandLine is nil -- and used to crash.
+		fileEvents := generateFileEvents(1001, "file:///project/app/generated/file%d.ts", lsproto.FileChangeTypeCreated)
+		fileEvents = append(fileEvents, &lsproto.FileEvent{
+			Uri:  "file:///project/newdir/tsconfig.json",
+			Type: lsproto.FileChangeTypeCreated,
+		})
+		session.DidChangeWatchedFiles(context.Background(), fileEvents)
+		_, err = session.GetLanguageService(context.Background(), "file:///project/app/main.ts")
+		assert.NilError(t, err)
 	})
 }
 

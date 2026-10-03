@@ -10,12 +10,91 @@ func (c *Checker) GetStringType() *Type {
 	return c.stringType
 }
 
+func (c *Checker) GetNumberType() *Type {
+	return c.numberType
+}
+
+func (c *Checker) GetBooleanType() *Type {
+	return c.booleanType
+}
+
+func (c *Checker) GetVoidType() *Type {
+	return c.voidType
+}
+
+func (c *Checker) GetUndefinedType() *Type {
+	return c.undefinedType
+}
+
+func (c *Checker) GetNullType() *Type {
+	return c.nullType
+}
+
+func (c *Checker) GetAnyType() *Type {
+	return c.anyType
+}
+
+func (c *Checker) GetErrorType() *Type {
+	return c.errorType
+}
+
+func (c *Checker) GetNeverType() *Type {
+	return c.neverType
+}
+
+func (c *Checker) GetUnknownType() *Type {
+	return c.unknownType
+}
+
+func (c *Checker) GetBigIntType() *Type {
+	return c.bigintType
+}
+
+func (c *Checker) GetESSymbolType() *Type {
+	return c.esSymbolType
+}
+
+func (c *Checker) GetNonPrimitiveType() *Type {
+	return c.nonPrimitiveType
+}
+
+func (c *Checker) GetBaseTypeOfLiteralType(t *Type) *Type {
+	return c.getBaseTypeOfLiteralType(t)
+}
+
 func (c *Checker) GetUnknownSymbol() *ast.Symbol {
 	return c.unknownSymbol
 }
 
+func (c *Checker) GetUndefinedSymbol() *ast.Symbol {
+	return c.undefinedSymbol
+}
+
+func (c *Checker) GetArgumentsSymbol() *ast.Symbol {
+	return c.argumentsSymbol
+}
+
+func (c *Checker) GetUnknownSignature() *Signature {
+	return c.unknownSignature
+}
+
 func (c *Checker) GetUnionType(types []*Type) *Type {
 	return c.getUnionType(types)
+}
+
+func (c *Checker) GetNameTypeOfSymbol(symbol *ast.Symbol) *Type {
+	if !c.valueSymbolLinks.Has(symbol) {
+		return nil
+	}
+	return c.valueSymbolLinks.TryGet(symbol).nameType
+}
+
+func IsTypeUsableAsPropertyName(t *Type) bool {
+	return isTypeUsableAsPropertyName(t)
+}
+
+func GetPropertyNameFromType(t *Type) string {
+	return getPropertyNameFromType(t)
 }
 
 func (c *Checker) GetGlobalSymbol(name string, meaning ast.SymbolFlags, diagnostic *diagnostics.Message) *ast.Symbol {
@@ -106,6 +185,18 @@ func (c *Checker) GetConstraintOfTypeParameter(typeParameter *Type) *Type {
 	return c.getConstraintOfTypeParameter(typeParameter)
 }
 
+func (c *Checker) GetTrueTypeOfConditionalType(t *Type) *Type {
+	return c.getTrueTypeFromConditionalType(t)
+}
+
+func (c *Checker) GetFalseTypeOfConditionalType(t *Type) *Type {
+	return c.getFalseTypeFromConditionalType(t)
+}
+
+func (c *Checker) GetDefaultFromTypeParameter(typeParameter *Type) *Type {
+	return c.getDefaultFromTypeParameter(typeParameter)
+}
+
 func (c *Checker) GetResolutionModeOverride(node *ast.ImportAttributes, reportErrors bool) core.ResolutionMode {
 	return c.getResolutionModeOverride(node, reportErrors)
 }
@@ -124,6 +215,10 @@ func (c *Checker) GetTypePredicateOfSignature(sig *Signature) *TypePredicate {
 
 func IsTupleType(t *Type) bool {
 	return isTupleType(t)
+}
+
+func (c *Checker) IsArrayType(t *Type) bool {
+	return c.isArrayType(t)
 }
 
 func (c *Checker) GetReturnTypeOfSignature(sig *Signature) *Type {
@@ -175,6 +270,14 @@ func (c *Checker) GetJsxNamespace(location *ast.Node) string {
 	return c.getJsxNamespace(location)
 }
 
+func (c *Checker) GetJsxFragmentFactory(location *ast.Node) string {
+	entity := c.getJsxFragmentFactoryEntity(location)
+	if entity != nil {
+		return ast.GetFirstIdentifier(entity).Text()
+	}
+	return ""
+}
+
 func (c *Checker) ResolveName(name string, location *ast.Node, meaning ast.SymbolFlags, excludeGlobals bool) *ast.Symbol {
 	return c.resolveName(location, name, meaning, nil, true, excludeGlobals)
 }
@@ -185,4 +288,86 @@ func (c *Checker) GetSymbolFlags(symbol *ast.Symbol) ast.SymbolFlags {
 
 func (c *Checker) GetBaseTypes(t *Type) []*Type {
 	return c.getBaseTypes(t)
+}
+
+func (c *Checker) GetApparentType(t *Type) *Type {
+	return c.getApparentType(t)
+}
+
+// GetFullyQualifiedName returns the fully qualified name of a symbol, walking up
+// its parent chain (e.g. `"/path/to/module".Namespace.Name`).
+func (c *Checker) GetFullyQualifiedName(symbol *ast.Symbol) string {
+	return c.getFullyQualifiedName(symbol, nil /*containingLocation*/)
+}
+
+func (c *Checker) GetBaseConstructorTypeOfClass(t *Type) *Type {
+	return c.getBaseConstructorTypeOfClass(t)
+}
+
+func (c *Checker) GetMemberOverrideModifierStatus(node *ast.Node, member *ast.Node, memberSymbol *ast.Symbol) MemberOverrideStatus {
+	return c.getMemberOverrideModifierStatus(node, member, memberSymbol)
+}
+
+func (c *Checker) GetRestTypeOfSignature(sig *Signature) *Type {
+	return c.getRestTypeOfSignature(sig)
+}
+
+func (c *Checker) GetTypeArguments(t *Type) []*Type {
+	return c.getTypeArguments(t)
+}
+
+func (c *Checker) GetIndexInfoOfType(t *Type, keyType *Type) *IndexInfo {
+	return c.getIndexInfoOfType(t, keyType)
+}
+
+func (c *Checker) GetIndexInfosOfType(t *Type) []*IndexInfo {
+	return c.getIndexInfosOfType(t)
+}
+
+func (c *Checker) IsContextSensitive(node *ast.Node) bool {
+	return c.isContextSensitive(node)
+}
+
+func (c *Checker) FillMissingTypeArguments(typeArguments []*Type, typeParameters []*Type, minTypeArgumentCount int, isJavaScriptImplicitAny bool) []*Type {
+	return c.fillMissingTypeArguments(typeArguments, typeParameters, minTypeArgumentCount, isJavaScriptImplicitAny)
+}
+
+func (c *Checker) GetMinTypeArgumentCount(typeParameters []*Type) int {
+	return c.getMinTypeArgumentCount(typeParameters)
+}
+
+func (c *Checker) GetWidenedLiteralType(t *Type) *Type {
+	return c.getWidenedLiteralType(t)
+}
+
+func (c *Checker) IsTypeAssignableTo(source *Type, target *Type) bool {
+	return c.isTypeAssignableTo(source, target)
+}
+
+func (c *Checker) GetUnionTypeEx(types []*Type, unionReduction UnionReduction) *Type {
+	return c.getUnionTypeEx(types, unionReduction, nil, nil)
+}
+
+func (c *Checker) RequiresAddingImplicitUndefined(node *ast.Node) bool {
+	enclosingDeclaration := ast.FindAncestor(node, ast.IsDeclaration)
+	if enclosingDeclaration == nil {
+		enclosingDeclaration = ast.GetSourceFileOfNode(node).AsNode()
+	}
+	symbol := node.Symbol()
+	if symbol == nil {
+		return false
+	}
+	return c.GetEmitResolver().RequiresAddingImplicitUndefined(node, symbol, enclosingDeclaration)
+}
+
+func (c *Checker) RemoveMissingOrUndefinedType(t *Type) *Type {
+	return c.removeMissingOrUndefinedType(t)
+}
+
+func (c *Checker) GetWidenedType(t *Type) *Type {
+	return c.getWidenedType(t)
+}
+
+func (c *Checker) CompareSymbols(s1, s2 *ast.Symbol) int {
+	return c.compareSymbols(s1, s2)
 }

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
 	"github.com/microsoft/typescript-go/internal/core"
@@ -29,7 +30,7 @@ func (f *FileInfo) AffectsGlobalScope() bool               { return f.affectsGlo
 func (f *FileInfo) ImpliedNodeFormat() core.ResolutionMode { return f.impliedNodeFormat }
 
 func ComputeHash(text string, hashWithText bool) string {
-	hashBytes := xxh3.Hash128([]byte(text)).Bytes()
+	hashBytes := xxh3.HashString128(text).Bytes()
 	hash := hex.EncodeToString(hashBytes[:])
 	if hashWithText {
 		hash += "-" + text
@@ -137,6 +138,8 @@ type buildInfoDiagnosticWithFileName struct {
 	end                int
 	code               int32
 	category           diagnostics.Category
+	source             string
+	messageText        string
 	messageKey         diagnostics.Key
 	messageArgs        []string
 	messageChain       []*buildInfoDiagnosticWithFileName
@@ -144,6 +147,7 @@ type buildInfoDiagnosticWithFileName struct {
 	reportsUnnecessary bool
 	reportsDeprecated  bool
 	skippedOnNoEmit    bool
+	repopulateInfo     *ast.RepopulateDiagnosticInfo
 }
 
 type DiagnosticsOrBuildInfoDiagnosticsWithFileName struct {
@@ -158,6 +162,11 @@ func (b *buildInfoDiagnosticWithFileName) toDiagnostic(p *compiler.Program, file
 	} else if !b.noFile {
 		fileForDiagnostic = file
 	}
+
+	if b.repopulateInfo != nil {
+		return repopulateDiagnosticChain(b, p, fileForDiagnostic)
+	}
+
 	var messageChain []*ast.Diagnostic
 	for _, msg := range b.messageChain {
 		messageChain = append(messageChain, msg.toDiagnostic(p, fileForDiagnostic))
@@ -166,7 +175,7 @@ func (b *buildInfoDiagnosticWithFileName) toDiagnostic(p *compiler.Program, file
 	for _, info := range b.relatedInformation {
 		relatedInformation = append(relatedInformation, info.toDiagnostic(p, fileForDiagnostic))
 	}
-	return ast.NewDiagnosticFromSerialized(
+	diagnostic := ast.NewDiagnosticFromSerialized(
 		fileForDiagnostic,
 		core.NewTextRange(b.pos, b.end),
 		b.code,
@@ -178,6 +187,108 @@ func (b *buildInfoDiagnosticWithFileName) toDiagnostic(p *compiler.Program, file
 		b.reportsUnnecessary,
 		b.reportsDeprecated,
 		b.skippedOnNoEmit,
+	)
+	if b.source != "" || b.messageText != "" {
+		diagnostic.SetExternalData(b.source, b.messageText)
+	}
+	return diagnostic
+}
+
+// repopulateDiagnosticChain recomputes a diagnostic chain entry that depends on
+// program state which may have changed between incremental builds.
+func repopulateDiagnosticChain(b *buildInfoDiagnosticWithFileName, p *compiler.Program, file *ast.SourceFile) *ast.Diagnostic {
+	info := b.repopulateInfo
+	switch info.Kind {
+	case ast.RepopulateModeMismatch:
+		return repopulateModeMismatchChain(b, p, file)
+	case ast.RepopulateModuleNotFound:
+		return repopulateModuleNotFoundChain(b, p, file, info)
+	default:
+		// Fall back to using the stored (possibly stale) data
+		return b.toDiagnosticWithoutRepopulate(p, file)
+	}
+}
+
+func (b *buildInfoDiagnosticWithFileName) toDiagnosticWithoutRepopulate(p *compiler.Program, file *ast.SourceFile) *ast.Diagnostic {
+	var messageChain []*ast.Diagnostic
+	for _, msg := range b.messageChain {
+		messageChain = append(messageChain, msg.toDiagnostic(p, file))
+	}
+	var relatedInformation []*ast.Diagnostic
+	for _, info := range b.relatedInformation {
+		relatedInformation = append(relatedInformation, info.toDiagnostic(p, file))
+	}
+	return ast.NewDiagnosticFromSerialized(
+		file,
+		core.NewTextRange(b.pos, b.end),
+		b.code,
+		b.category,
+		b.messageKey,
+		b.messageArgs,
+		messageChain,
+		relatedInformation,
+		b.reportsUnnecessary,
+		b.reportsDeprecated,
+		b.skippedOnNoEmit,
+	)
+}
+
+func repopulateModeMismatchChain(b *buildInfoDiagnosticWithFileName, p *compiler.Program, file *ast.SourceFile) *ast.Diagnostic {
+	if file == nil {
+		return b.toDiagnosticWithoutRepopulate(p, file)
+	}
+
+	details := checker.CreateModeMismatchDetails(p, file)
+
+	var nextChain []*ast.Diagnostic
+	for _, msg := range b.messageChain {
+		nextChain = append(nextChain, msg.toDiagnostic(p, file))
+	}
+
+	return ast.NewDiagnosticFromSerialized(
+		file,
+		core.NewTextRange(b.pos, b.end),
+		details.Message.Code(),
+		details.Message.Category(),
+		details.Message.Key(),
+		diagnostics.StringifyArgs(details.Args),
+		nextChain,
+		nil,
+		false,
+		false,
+		false,
+	)
+}
+
+func repopulateModuleNotFoundChain(b *buildInfoDiagnosticWithFileName, p *compiler.Program, file *ast.SourceFile, info *ast.RepopulateDiagnosticInfo) *ast.Diagnostic {
+	if file == nil {
+		return b.toDiagnosticWithoutRepopulate(p, file)
+	}
+
+	packageName := info.PackageName
+	if packageName == "" {
+		packageName = info.ModuleReference
+	}
+
+	details := checker.CreateModuleNotFoundChain(p, file, info.ModuleReference, info.Mode, packageName)
+
+	var nextChain []*ast.Diagnostic
+	for _, msg := range b.messageChain {
+		nextChain = append(nextChain, msg.toDiagnostic(p, file))
+	}
+
+	return ast.NewDiagnosticFromSerialized(
+		file,
+		core.NewTextRange(b.pos, b.end),
+		details.Message.Code(),
+		details.Message.Category(),
+		details.Message.Key(),
+		diagnostics.StringifyArgs(details.Args),
+		nextChain,
+		nil,
+		false,
+		false,
+		false,
 	)
 }
 
@@ -218,6 +329,9 @@ type snapshot struct {
 	hasSemanticErrors bool
 	// If semantic diagnostic check is pending
 	checkPending bool
+	// Looked up package.json files from
+	packageJsons        []string
+	missingPackageJsons []string
 
 	// Additional fields that are not serialized but needed to track state
 
@@ -226,6 +340,8 @@ type snapshot struct {
 	hasErrorsFromOldState                   core.Tristate
 	hasSemanticErrorsFromOldState           bool
 	allFilesExcludingDefaultLibraryFileOnce sync.Once
+	packageJsonsFromOldState                []string
+	missingPackageJsonsFromOldState         []string
 	//  Cache of all files excluding default library file for the current program
 	allFilesExcludingDefaultLibraryFile []*ast.SourceFile
 	hasChangedDtsFile                   bool

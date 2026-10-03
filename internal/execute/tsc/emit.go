@@ -11,7 +11,9 @@ import (
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
 	"github.com/microsoft/typescript-go/internal/diagnostics"
+	"github.com/microsoft/typescript-go/internal/execute/incremental"
 	"github.com/microsoft/typescript-go/internal/locale"
+	"github.com/microsoft/typescript-go/internal/tracing"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
@@ -38,6 +40,7 @@ type EmitInput struct {
 	CompileTimes       *CompileTimes
 	Testing            CommandLineTesting
 	TestingMTimesCache *collections.SyncMap[tspath.Path, time.Time]
+	Tracing            *tracing.Tracing
 }
 
 func EmitAndReportStatistics(input EmitInput) (CompileAndEmitResult, *Statistics) {
@@ -81,15 +84,30 @@ func EmitFilesAndReportErrors(input EmitInput) (result CompileAndEmitResult) {
 			// Options diagnostics include global diagnostics (even though we collect them separately),
 			// and global diagnostics create checkers, which then bind all of the files. Do this binding
 			// early so we can track the time.
+			if tr := input.Tracing; tr != nil {
+				defer tr.Push(tracing.PhaseBind, "bindSourceFiles", nil, true)()
+			}
 			bindStart := input.Sys.Now()
 			diags := input.ProgramLike.GetBindDiagnostics(ctx, file)
 			result.times.bindTime = input.Sys.Now().Sub(bindStart)
 			return diags
 		},
 		func(ctx context.Context, file *ast.SourceFile) []*ast.Diagnostic {
+			if tr := input.Tracing; tr != nil {
+				defer tr.Push(tracing.PhaseCheck, "checkSourceFiles", nil, true)()
+			}
 			checkStart := input.Sys.Now()
 			diags := input.ProgramLike.GetSemanticDiagnostics(ctx, file)
 			result.times.checkTime = input.Sys.Now().Sub(checkStart)
+			if program, ok := input.ProgramLike.(*incremental.Program); ok {
+				nestedEmitTime := program.TakeNestedEmitTime()
+				if nestedEmitTime > result.times.checkTime {
+					result.times.checkTime = 0
+				} else {
+					result.times.checkTime -= nestedEmitTime
+				}
+				result.times.emitTime += nestedEmitTime
+			}
 			return diags
 		},
 	)
@@ -100,7 +118,7 @@ func EmitFilesAndReportErrors(input EmitInput) (result CompileAndEmitResult) {
 		emitResult = input.ProgramLike.Emit(ctx, compiler.EmitOptions{
 			WriteFile: input.WriteFile,
 		})
-		result.times.emitTime = input.Sys.Now().Sub(emitStart)
+		result.times.emitTime += input.Sys.Now().Sub(emitStart)
 	}
 	if emitResult != nil {
 		allDiagnostics = append(allDiagnostics, emitResult.Diagnostics...)
@@ -131,7 +149,7 @@ func listFiles(input EmitInput, emitResult *compiler.EmitResult) {
 	options := input.Program.Options()
 	if options.ListEmittedFiles.IsTrue() {
 		for _, file := range emitResult.EmittedFiles {
-			fmt.Fprintln(input.Writer, "TSFILE: ", tspath.GetNormalizedAbsolutePath(file, input.Program.GetCurrentDirectory()))
+			fmt.Fprintln(input.Writer, "TSFILE:", tspath.GetNormalizedAbsolutePath(file, input.Program.GetCurrentDirectory()))
 		}
 	}
 	if options.ExplainFiles.IsTrue() {

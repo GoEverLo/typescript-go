@@ -27,7 +27,8 @@ test({
     [|a|]/**/
   }
 })`
-	f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
 	f.VerifyCompletions(t, "", &fourslash.CompletionsExpectedList{
 		IsIncomplete: false,
 		ItemDefaults: &fourslash.CompletionsExpectedItemDefaults{
@@ -38,8 +39,8 @@ test({
 			Exact: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:      "autoIncrement?",
-					FilterText: PtrTo("autoIncrement"),
-					SortText:   PtrTo(string(ls.SortTextOptionalMember)),
+					FilterText: new("autoIncrement"),
+					SortText:   new(string(ls.SortTextOptionalMember)),
 					TextEdit: &lsproto.TextEditOrInsertReplaceEdit{
 						InsertReplaceEdit: &lsproto.InsertReplaceEdit{
 							NewText: "autoIncrement",

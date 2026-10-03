@@ -47,6 +47,18 @@ func (c *externalModuleInfoCollector) collect() *externalModuleInfo {
 	hasImportStar := false
 	hasImportDefault := false
 	for _, node := range c.sourceFile.Statements.Nodes {
+		// Look through NotEmittedStatement to find elided export= declarations
+		// (e.g., `declare export = x` is elided by the type eraser but must still be collected)
+		if ast.IsNotEmittedStatement(node) {
+			original := c.emitContext.MostOriginal(node)
+			if original != nil && ast.IsExportAssignment(original) {
+				n := original.AsExportAssignment()
+				if n.IsExportEquals && c.output.exportEquals == nil {
+					c.output.exportEquals = n
+				}
+			}
+			continue
+		}
 		switch node.Kind {
 		case ast.KindImportDeclaration:
 			// import "mod"
@@ -259,9 +271,9 @@ func createExternalHelpersImportDeclarationIfNeeded(emitContext *printer.EmitCon
 					nil,   /*modifiers*/
 					false, /*isTypeOnly*/
 					externalHelpersModuleName,
-					emitContext.Factory.NewExternalModuleReference(emitContext.Factory.NewStringLiteral(externalHelpersModuleNameText)),
+					emitContext.Factory.NewExternalModuleReference(emitContext.Factory.NewStringLiteral(externalHelpersModuleNameText, ast.TokenFlagsNone)),
 				)
-				emitContext.AddEmitFlags(externalHelpersImportDeclaration, printer.EFNeverApplyImportHelper|printer.EFCustomPrologue)
+				emitContext.AddEmitFlags(externalHelpersImportDeclaration, printer.EFCustomPrologue)
 				return externalHelpersImportDeclaration
 			}
 		} else {
@@ -280,7 +292,7 @@ func createExternalHelpersImportDeclarationIfNeeded(emitContext *printer.EmitCon
 				// NOTE: We don't need to care about global import collisions as this is a module.
 
 				importSpecifiers := core.Map(helperNames, func(name string) *ast.ImportSpecifierNode {
-					if printer.IsFileLevelUniqueName(sourceFile, name, nil /*hasGlobalName*/) {
+					if emitContext.IsFileLevelUniqueName(sourceFile, name, nil /*hasGlobalName*/) {
 						return emitContext.Factory.NewImportSpecifier(false /*isTypeOnly*/, nil /*propertyName*/, emitContext.Factory.NewIdentifier(name))
 					} else {
 						return emitContext.Factory.NewImportSpecifier(false /*isTypeOnly*/, emitContext.Factory.NewIdentifier(name), emitContext.Factory.NewUnscopedHelperName(name))
@@ -293,11 +305,11 @@ func createExternalHelpersImportDeclarationIfNeeded(emitContext *printer.EmitCon
 				externalHelpersImportDeclaration := emitContext.Factory.NewImportDeclaration(
 					nil, /*modifiers*/
 					emitContext.Factory.NewImportClause(ast.KindUnknown /*phaseModifier*/, nil /*name*/, namedBindings),
-					emitContext.Factory.NewStringLiteral(externalHelpersModuleNameText),
+					emitContext.Factory.NewStringLiteral(externalHelpersModuleNameText, ast.TokenFlagsNone),
 					nil, /*attributes*/
 				)
 
-				emitContext.AddEmitFlags(externalHelpersImportDeclaration, printer.EFNeverApplyImportHelper|printer.EFCustomPrologue)
+				emitContext.AddEmitFlags(externalHelpersImportDeclaration, printer.EFCustomPrologue)
 				return externalHelpersImportDeclaration
 			}
 		}
@@ -322,7 +334,7 @@ func getOrCreateExternalHelpersModuleNameIfNeeded(emitContext *printer.EmitConte
 	}
 
 	create := len(helpers) > 0 ||
-		(hasExportStarsToExportValues || compilerOptions.GetESModuleInterop() && hasImportStarOrImportDefault) &&
+		(hasExportStarsToExportValues || hasImportStarOrImportDefault) &&
 			fileModuleKind < core.ModuleKindSystem
 
 	if create {

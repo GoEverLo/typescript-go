@@ -12,6 +12,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/diagnostics"
 	"github.com/microsoft/typescript-go/internal/evaluator"
 	"github.com/microsoft/typescript-go/internal/scanner"
+	"github.com/microsoft/typescript-go/internal/tracing"
+	"github.com/zeebo/xxh3"
 )
 
 type FlowType struct {
@@ -40,7 +42,7 @@ type FlowState struct {
 	declaredType    *Type
 	initialType     *Type
 	flowContainer   *ast.Node
-	refKey          string
+	refKey          CacheHashKey
 	depth           int
 	sharedFlowStart int
 	reduceLabels    []*ast.FlowReduceLabelData
@@ -116,6 +118,9 @@ func (c *Checker) getTypeAtFlowNode(f *FlowState, flow *ast.FlowNode) FlowType {
 	if f.depth == 2000 {
 		// We have made 2000 recursive invocations. To avoid overflowing the call stack we report an error
 		// and disable further control flow analysis in the containing function or module body.
+		if tr := c.tracer; tr != nil {
+			tr.Instant(tracing.PhaseCheckTypes, "getTypeAtFlowNode_DepthLimit", map[string]any{"depth": f.depth})
+		}
 		c.flowAnalysisDisabled = true
 		c.reportFlowControlError(f.reference)
 		return FlowType{t: c.errorType}
@@ -251,6 +256,13 @@ func (c *Checker) getTypeAtFlowAssignment(f *FlowState, flow *ast.FlowNode) Flow
 		if !c.isReachableFlowNode(flow) {
 			return FlowType{t: c.unreachableNeverType}
 		}
+		// A matching dotted name might also be an expando property on a function *expression*,
+		// in which case we continue control flow analysis back to the function's declaration
+		if ast.IsVariableDeclaration(node) && (ast.IsInJSFile(node) || ast.IsVarConstLike(node)) {
+			if init := node.Initializer(); init != nil && ast.IsFunctionExpressionOrArrowFunction(init) {
+				return c.getTypeAtFlowNode(f, flow.Antecedent)
+			}
+		}
 		return FlowType{t: f.declaredType}
 	}
 	// for (const _ in ref) acts as a nonnull on ref
@@ -309,7 +321,7 @@ func (c *Checker) narrowTypeByTypePredicate(f *FlowState, t *Type, predicate *Ty
 			if c.isMatchingReference(f.reference, predicateArgument) {
 				return c.getNarrowedType(t, predicate.t, assumeTrue, false /*checkDerived*/)
 			}
-			if c.strictNullChecks && c.optionalChainContainsReference(predicateArgument, f.reference) && (assumeTrue && !(c.hasTypeFacts(predicate.t, TypeFactsEQUndefined)) || !assumeTrue && everyType(predicate.t, c.IsNullableType)) {
+			if c.strictNullChecks && c.optionalChainContainsReference(predicateArgument, f.reference) && (assumeTrue && !c.hasTypeFacts(predicate.t, TypeFactsEQUndefined) || !assumeTrue && everyType(predicate.t, c.IsNullableType)) {
 				t = c.getAdjustedTypeWithFacts(t, TypeFactsNEUndefinedOrNull)
 			}
 			access := c.getDiscriminantPropertyAccess(f, predicateArgument, t)
@@ -574,12 +586,24 @@ func (c *Checker) narrowTypeByEquality(t *Type, operator ast.Kind, value *ast.No
 				return c.nonPrimitiveType
 			}
 		}
+		if !doubleEquals && valueType.flags&TypeFlagsPrimitive != 0 && c.isUniformUnionType(t) {
+			regularType := c.getRegularTypeOfLiteralType(valueType)
+			if c.unionContainsType(t, regularType, false /*matchSymbol*/) {
+				return regularType
+			}
+		}
 		filteredType := c.filterType(t, func(t *Type) bool {
 			return c.areTypesComparable(t, valueType) || doubleEquals && isCoercibleUnderDoubleEquals(t, valueType)
 		})
 		return c.replacePrimitivesWithLiterals(filteredType, valueType)
 	}
 	if isUnitType(valueType) {
+		if c.isUniformUnionType(t) {
+			filteredType := c.removeType(t, c.getRegularTypeOfLiteralType(valueType))
+			if filteredType != t {
+				return filteredType
+			}
+		}
 		return c.filterType(t, func(t *Type) bool {
 			return !(c.isUnitLikeType(t) && c.areTypesComparable(t, valueType))
 		})
@@ -724,12 +748,13 @@ func (c *Checker) narrowTypeByDiscriminant(t *Type, access *ast.Node, narrowType
 }
 
 func (c *Checker) isMatchingConstructorReference(f *FlowState, expr *ast.Node) bool {
-	if ast.IsAccessExpression(expr) {
-		if accessedName, ok := c.getAccessedPropertyName(expr); ok && accessedName == "constructor" && c.isMatchingReference(f.reference, expr.Expression()) {
-			return true
-		}
+	var name *ast.Node
+	if ast.IsPropertyAccessExpression(expr) {
+		name = expr.AsPropertyAccessExpression().Name()
+	} else if ast.IsElementAccessExpression(expr) && ast.IsStringLiteralLike(expr.AsElementAccessExpression().ArgumentExpression) {
+		name = expr.AsElementAccessExpression().ArgumentExpression
 	}
-	return false
+	return name != nil && name.Text() == "constructor" && c.isMatchingReference(f.reference, expr.Expression())
 }
 
 func (c *Checker) narrowTypeByConstructor(t *Type, operator ast.Kind, identifier *ast.Node, assumeTrue bool) *Type {
@@ -1097,8 +1122,16 @@ func (c *Checker) narrowTypeBySwitchOnDiscriminant(t *Type, data *ast.FlowSwitch
 	if discriminantType.flags&TypeFlagsNever != 0 {
 		caseType = c.neverType
 	} else {
-		filtered := c.filterType(t, func(t *Type) bool { return c.areTypesComparable(discriminantType, t) })
-		caseType = c.replacePrimitivesWithLiterals(filtered, discriminantType)
+		if discriminantType.flags&TypeFlagsPrimitive != 0 && c.isUniformUnionType(t) {
+			regularType := c.getRegularTypeOfLiteralType(discriminantType)
+			if c.unionContainsType(t, regularType, false /*matchSymbol*/) {
+				caseType = regularType
+			}
+		}
+		if caseType == nil {
+			filtered := c.filterType(t, func(t *Type) bool { return c.areTypesComparable(discriminantType, t) })
+			caseType = c.replacePrimitivesWithLiterals(filtered, discriminantType)
+		}
 	}
 	if !hasDefaultClause {
 		return caseType
@@ -1111,7 +1144,9 @@ func (c *Checker) narrowTypeBySwitchOnDiscriminant(t *Type, data *ast.FlowSwitch
 		if t.flags&TypeFlagsUndefined == 0 {
 			u = c.getRegularTypeOfLiteralType(c.extractUnitType(t))
 		}
-		return !slices.Contains(switchTypes, u)
+		return !slices.ContainsFunc(switchTypes, func(st *Type) bool {
+			return isUnitType(st) && c.areTypesComparable(st, u)
+		})
 	})
 	if caseType.flags&TypeFlagsNever != 0 {
 		return defaultType
@@ -1288,10 +1323,10 @@ func (c *Checker) getUnionOrEvolvingArrayType(f *FlowState, types []*Type, subty
 }
 
 func (c *Checker) getTypeAtFlowLoopLabel(f *FlowState, flow *ast.FlowNode) FlowType {
-	if f.refKey == "" {
+	if f.refKey.IsZero() {
 		f.refKey = c.getFlowReferenceKey(f)
 	}
-	if f.refKey == "?" {
+	if f.refKey == nonDottedNameCacheKey {
 		// No cache key is generated when binding patterns are in unnarrowable situations
 		return FlowType{t: f.declaredType}
 	}
@@ -1428,7 +1463,7 @@ func (c *Checker) getCandidateDiscriminantPropertyAccess(f *FlowState, expr *ast
 		if ast.IsIdentifier(expr) {
 			symbol := c.getResolvedSymbol(expr)
 			declaration := c.getExportSymbolOfValueSymbolIfExported(symbol).ValueDeclaration
-			if declaration != nil && (ast.IsBindingElement(declaration) || ast.IsParameter(declaration)) && f.reference == declaration.Parent && declaration.Initializer() == nil && !hasDotDotDotToken(declaration) {
+			if declaration != nil && (ast.IsBindingElement(declaration) || ast.IsParameterDeclaration(declaration)) && f.reference == declaration.Parent && declaration.Initializer() == nil && !hasDotDotDotToken(declaration) {
 				return declaration
 			}
 		}
@@ -1441,21 +1476,27 @@ func (c *Checker) getCandidateDiscriminantPropertyAccess(f *FlowState, expr *ast
 		symbol := c.getResolvedSymbol(expr)
 		if c.isConstantVariable(symbol) {
 			declaration := symbol.ValueDeclaration
+			initializer := getCandidateVariableDeclarationInitializer(declaration)
 			// Given 'const x = obj.kind', allow 'x' as an alias for 'obj.kind'
-			if ast.IsVariableDeclaration(declaration) && declaration.Type() == nil {
-				if initializer := declaration.Initializer(); initializer != nil && ast.IsAccessExpression(initializer) && c.isMatchingReference(f.reference, initializer.Expression()) {
-					return initializer
-				}
+			if initializer != nil && ast.IsAccessExpression(initializer) && c.isMatchingReference(f.reference, initializer.Expression()) {
+				return initializer
 			}
 			// Given 'const { kind: x } = obj', allow 'x' as an alias for 'obj.kind'
 			if ast.IsBindingElement(declaration) && declaration.Initializer() == nil {
-				parent := declaration.Parent.Parent
-				if ast.IsVariableDeclaration(parent) && parent.Type() == nil {
-					if initializer := parent.Initializer(); initializer != nil && (ast.IsIdentifier(initializer) || ast.IsAccessExpression(initializer)) && c.isMatchingReference(f.reference, initializer) {
-						return declaration
-					}
+				initializer = getCandidateVariableDeclarationInitializer(declaration.Parent.Parent)
+				if initializer != nil && (ast.IsIdentifier(initializer) || ast.IsAccessExpression(initializer)) && c.isMatchingReference(f.reference, initializer) {
+					return declaration
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func getCandidateVariableDeclarationInitializer(node *ast.Node) *ast.Node {
+	if ast.IsVariableDeclaration(node) && node.Type() == nil {
+		if initializer := node.Initializer(); initializer != nil {
+			return ast.SkipParentheses(initializer)
 		}
 	}
 	return nil
@@ -1550,7 +1591,7 @@ func (c *Checker) reportFlowControlError(node *ast.Node) {
 	block := ast.FindAncestor(node, ast.IsFunctionOrModuleBlock)
 	sourceFile := ast.GetSourceFileOfNode(node)
 	span := scanner.GetRangeOfTokenAtPosition(sourceFile, block.StatementList().Pos())
-	c.diagnostics.Add(ast.NewDiagnostic(sourceFile, span, diagnostics.The_containing_function_or_module_body_is_too_large_for_control_flow_analysis))
+	c.addDiagnostic(ast.NewDiagnostic(sourceFile, span, diagnostics.The_containing_function_or_module_body_is_too_large_for_control_flow_analysis))
 }
 
 func (c *Checker) isMatchingReference(source *ast.Node, target *ast.Node) bool {
@@ -1607,19 +1648,21 @@ func (c *Checker) isMatchingReference(source *ast.Node, target *ast.Node) bool {
 	return false
 }
 
+var nonDottedNameCacheKey = CacheHashKey(xxh3.HashString128("?"))
+
 // Return the flow cache key for a "dotted name" (i.e. a sequence of identifiers
 // separated by dots). The key consists of the id of the symbol referenced by the
 // leftmost identifier followed by zero or more property names separated by dots.
-// The result is an empty string if the reference isn't a dotted name.
-func (c *Checker) getFlowReferenceKey(f *FlowState) string {
-	var b KeyBuilder
+// The result is nonDottedNameCacheKey if the reference isn't a dotted name.
+func (c *Checker) getFlowReferenceKey(f *FlowState) CacheHashKey {
+	var b keyBuilder
 	if c.writeFlowCacheKey(&b, f.reference, f.declaredType, f.initialType, f.flowContainer) {
-		return b.String()
+		return b.hash()
 	}
-	return "?" // Reference isn't a dotted name
+	return nonDottedNameCacheKey // Reference isn't a dotted name
 }
 
-func (c *Checker) writeFlowCacheKey(b *KeyBuilder, node *ast.Node, declaredType *Type, initialType *Type, flowContainer *ast.Node) bool {
+func (c *Checker) writeFlowCacheKey(b *keyBuilder, node *ast.Node, declaredType *Type, initialType *Type, flowContainer *ast.Node) bool {
 	switch node.Kind {
 	case ast.KindIdentifier:
 		if !ast.IsThisInTypeQuery(node) {
@@ -1627,19 +1670,19 @@ func (c *Checker) writeFlowCacheKey(b *KeyBuilder, node *ast.Node, declaredType 
 			if symbol == c.unknownSymbol {
 				return false
 			}
-			b.WriteSymbol(symbol)
+			b.writeSymbol(symbol)
 		}
 		fallthrough
 	case ast.KindThisKeyword:
-		b.WriteByte(':')
-		b.WriteType(declaredType)
+		b.writeByte(':')
+		b.writeType(declaredType)
 		if initialType != declaredType {
-			b.WriteByte('=')
-			b.WriteType(initialType)
+			b.writeByte('=')
+			b.writeType(initialType)
 		}
 		if flowContainer != nil {
-			b.WriteByte('@')
-			b.WriteNode(flowContainer)
+			b.writeByte('@')
+			b.writeNode(flowContainer)
 		}
 		return true
 	case ast.KindNonNullExpression, ast.KindParenthesizedExpression:
@@ -1648,16 +1691,16 @@ func (c *Checker) writeFlowCacheKey(b *KeyBuilder, node *ast.Node, declaredType 
 		if !c.writeFlowCacheKey(b, node.AsQualifiedName().Left, declaredType, initialType, flowContainer) {
 			return false
 		}
-		b.WriteByte('.')
-		b.WriteString(node.AsQualifiedName().Right.Text())
+		b.writeByte('.')
+		b.writeString(node.AsQualifiedName().Right.Text())
 		return true
 	case ast.KindPropertyAccessExpression, ast.KindElementAccessExpression:
 		if propName, ok := c.getAccessedPropertyName(node); ok {
 			if !c.writeFlowCacheKey(b, node.Expression(), declaredType, initialType, flowContainer) {
 				return false
 			}
-			b.WriteByte('.')
-			b.WriteString(propName)
+			b.writeByte('.')
+			b.writeString(propName)
 			return true
 		}
 		if ast.IsElementAccessExpression(node) && ast.IsIdentifier(node.AsElementAccessExpression().ArgumentExpression) {
@@ -1666,16 +1709,16 @@ func (c *Checker) writeFlowCacheKey(b *KeyBuilder, node *ast.Node, declaredType 
 				if !c.writeFlowCacheKey(b, node.Expression(), declaredType, initialType, flowContainer) {
 					return false
 				}
-				b.WriteString(".@")
-				b.WriteSymbol(symbol)
+				b.writeString(".@")
+				b.writeSymbol(symbol)
 				return true
 			}
 		}
 	case ast.KindObjectBindingPattern, ast.KindArrayBindingPattern, ast.KindFunctionDeclaration,
 		ast.KindFunctionExpression, ast.KindArrowFunction, ast.KindMethodDeclaration:
-		b.WriteNode(node)
-		b.WriteByte('#')
-		b.WriteType(declaredType)
+		b.writeNode(node)
+		b.writeByte('#')
+		b.writeType(declaredType)
 		return true
 	}
 	return false
@@ -1691,7 +1734,7 @@ func (c *Checker) getAccessedPropertyName(access *ast.Node) (string, bool) {
 	if ast.IsBindingElement(access) {
 		return c.getDestructuringPropertyName(access)
 	}
-	if ast.IsParameter(access) {
+	if ast.IsParameterDeclaration(access) {
 		return strconv.Itoa(slices.Index(access.Parent.Parameters(), access)), true
 	}
 	return "", false
@@ -1722,16 +1765,11 @@ func (c *Checker) tryGetNameFromEntityNameExpression(node *ast.Node) (string, bo
 			return name, true
 		}
 	}
-	if hasOnlyExpressionInitializer(declaration) && c.isBlockScopedNameDeclaredBeforeUse(declaration, node) {
-		initializer := declaration.Initializer()
-		if initializer != nil {
-			var initializerType *Type
-			if ast.IsBindingPattern(declaration.Parent) {
-				initializerType = c.getTypeForBindingElement(declaration)
-			} else {
-				initializerType = c.getTypeOfExpression(initializer)
-			}
-			if initializerType != nil {
+	// We exclude binding elements because their initializers don't solely determine their types and resolving
+	// full types can cause circularities (see https://github.com/microsoft/TypeScript/issues/63192).
+	if hasOnlyExpressionInitializer(declaration) && !ast.IsBindingElement(declaration) && c.isBlockScopedNameDeclaredBeforeUse(declaration, node) {
+		if initializer := declaration.Initializer(); initializer != nil {
+			if initializerType := c.getTypeOfExpression(initializer); initializerType != nil {
 				return tryGetNameFromType(initializerType)
 			}
 		} else if ast.IsEnumMember(declaration) {
@@ -1792,7 +1830,7 @@ func (c *Checker) isConstantReference(node *ast.Node) bool {
 		}
 	case ast.KindObjectBindingPattern, ast.KindArrayBindingPattern:
 		rootDeclaration := ast.GetRootDeclaration(node.Parent)
-		if ast.IsParameter(rootDeclaration) || ast.IsVariableDeclaration(rootDeclaration) && ast.IsCatchClause(rootDeclaration.Parent) {
+		if ast.IsParameterDeclaration(rootDeclaration) || ast.IsVariableDeclaration(rootDeclaration) && ast.IsCatchClause(rootDeclaration.Parent) {
 			return !c.isSomeSymbolAssigned(rootDeclaration)
 		}
 		return ast.IsVariableDeclaration(rootDeclaration) && c.isVarConstLike(rootDeclaration)
@@ -1955,15 +1993,11 @@ func (c *Checker) getSwitchClauseTypeOfWitnesses(node *ast.Node) []string {
 		witnesses := make([]string, len(clauses))
 		for i, clause := range clauses {
 			if clause.Kind == ast.KindCaseClause {
-				var text string
-				if ast.IsStringLiteralLike(clause.Expression()) {
-					text = clause.Expression().Text()
-				}
-				if text == "" {
+				if !ast.IsStringLiteralLike(clause.Expression()) {
 					witnesses = nil
 					break
 				}
-				if !slices.Contains(witnesses, text) {
+				if text := clause.Expression().Text(); !slices.Contains(witnesses, text) {
 					witnesses[i] = text
 				}
 			}
@@ -2120,6 +2154,10 @@ func (c *Checker) getTypeOfDottedName(node *ast.Node, diagnostic *ast.Diagnostic
 
 func (c *Checker) getExplicitTypeOfSymbol(symbol *ast.Symbol, diagnostic *ast.Diagnostic) *Type {
 	symbol = c.resolveSymbol(symbol)
+	if !c.resolvingExplicitTypeOfSymbol.AddIfAbsent(symbol) {
+		return nil
+	}
+	defer c.resolvingExplicitTypeOfSymbol.Delete(symbol)
 	if symbol.Flags&(ast.SymbolFlagsFunction|ast.SymbolFlagsMethod|ast.SymbolFlagsClass|ast.SymbolFlagsValueModule) != 0 {
 		return c.getTypeOfSymbol(symbol)
 	}
@@ -2157,7 +2195,7 @@ func (c *Checker) getExplicitTypeOfSymbol(symbol *ast.Symbol, diagnostic *ast.Di
 }
 
 func (c *Checker) isDeclarationWithExplicitTypeAnnotation(node *ast.Node) bool {
-	return (ast.IsVariableDeclaration(node) || ast.IsPropertyDeclaration(node) || ast.IsPropertySignatureDeclaration(node) || ast.IsParameter(node)) && node.Type() != nil ||
+	return (ast.IsVariableDeclaration(node) || ast.IsPropertyDeclaration(node) || ast.IsPropertySignatureDeclaration(node) || ast.IsParameterDeclaration(node)) && node.Type() != nil ||
 		c.isExpandoPropertyFunctionWithReturnTypeAnnotation(node)
 }
 
@@ -2299,6 +2337,9 @@ func (c *Checker) getTypeOfDestructuredArrayElement(t *Type, index int) *Type {
 }
 
 func (c *Checker) includeUndefinedInIndexSignature(t *Type) *Type {
+	if t == nil {
+		return nil
+	}
 	if c.compilerOptions.NoUncheckedIndexedAccess == core.TSTrue {
 		return c.getUnionType([]*Type{t, c.missingType})
 	}
@@ -2394,7 +2435,12 @@ func (c *Checker) typeMaybeAssignableTo(source *Type, target *Type) bool {
 	if source.flags&TypeFlagsUnion == 0 {
 		return c.isTypeAssignableTo(source, target)
 	}
-	for _, t := range source.AsUnionType().types {
+	// Quick exit when source union contains the target type
+	if containsType(source.Types(), target) {
+		return true
+	}
+	// Otherwise, check if any constituent type of the source union is assignable to the target type
+	for _, t := range source.Types() {
 		if c.isTypeAssignableTo(t, target) {
 			return true
 		}
@@ -2480,7 +2526,7 @@ func (c *Checker) isReachableFlowNodeWorker(f *FlowState, flow *ast.FlowNode, no
 		}
 		flags := flow.Flags
 		if flags&ast.FlowFlagsShared != 0 {
-			if !noCacheCheck {
+			if !noCacheCheck && len(f.reduceLabels) == 0 {
 				if reachable, ok := c.flowNodeReachable[flow]; ok {
 					return reachable
 				}

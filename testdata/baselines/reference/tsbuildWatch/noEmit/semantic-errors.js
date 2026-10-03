@@ -12,7 +12,7 @@ const a: number = "hello"
 }
 
 tsgo -b -verbose -w
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [2J[3J[H[[90mHH:MM:SS AM[0m] Starting compilation in watch mode...
 
@@ -46,7 +46,7 @@ Output::
   "size": 67,
   "semanticErrors": true
 }
-//// [/home/src/tslibs/TS/Lib/lib.d.ts] *Lib*
+//// [/home/src/tslibs/TS/Lib/lib.es2025.full.d.ts] *Lib*
 /// <reference no-default-lib="true"/>
 interface Boolean {}
 interface Function {}
@@ -70,9 +70,12 @@ interface Symbol {
 }
 declare const console: { log(msg: any): void; };
 
+Watch Registrations::
+Directory watches::
+  /home/src/projects/project (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -110,9 +113,12 @@ Output::
   "size": 45
 }
 
+Watch Registrations::
+Directory watches::
+  /home/src/projects/project (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -140,14 +146,18 @@ Output::
 [[90mHH:MM:SS AM[0m] Found 0 errors. Watching for file changes.
 
 //// [/home/src/projects/project/a.js] *new* 
+"use strict";
 const a = "hello";
 
 //// [/home/src/projects/project/tsconfig.tsbuildinfo] *rewrite with same content*
 //// [/home/src/projects/project/tsconfig.tsbuildinfo.readable.baseline.txt] *rewrite with same content*
 
+Watch Registrations::
+Directory watches::
+  /home/src/projects/project (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -177,9 +187,12 @@ Output::
 //// [/home/src/projects/project/tsconfig.tsbuildinfo] *rewrite with same content*
 //// [/home/src/projects/project/tsconfig.tsbuildinfo.readable.baseline.txt] *rewrite with same content*
 
+Watch Registrations::
+Directory watches::
+  /home/src/projects/project (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -223,9 +236,12 @@ Output::
   "semanticErrors": true
 }
 
+Watch Registrations::
+Directory watches::
+  /home/src/projects/project (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -261,9 +277,12 @@ Output::
 //// [/home/src/projects/project/tsconfig.tsbuildinfo] *rewrite with same content*
 //// [/home/src/projects/project/tsconfig.tsbuildinfo.readable.baseline.txt] *rewrite with same content*
 
+Watch Registrations::
+Directory watches::
+  /home/src/projects/project (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::
 
@@ -298,8 +317,11 @@ Output::
 //// [/home/src/projects/project/tsconfig.tsbuildinfo] *rewrite with same content*
 //// [/home/src/projects/project/tsconfig.tsbuildinfo.readable.baseline.txt] *rewrite with same content*
 
+Watch Registrations::
+Directory watches::
+  /home/src/projects/project (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /home/src/projects/project/a.ts
 Signatures::

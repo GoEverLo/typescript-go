@@ -7,6 +7,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/module"
+	"github.com/microsoft/typescript-go/internal/symlinks"
 	"github.com/microsoft/typescript-go/internal/tspath"
 	"github.com/microsoft/typescript-go/internal/vfs"
 	"github.com/microsoft/typescript-go/internal/vfs/cachedvfs"
@@ -26,7 +27,7 @@ func newProjectReferenceDtsFakingHost(loader *fileLoader) module.ResolutionHost 
 		fs: cachedvfs.From(&projectReferenceDtsFakingVfs{
 			projectReferenceFileMapper: loader.projectReferenceFileMapper,
 			dtsDirectories:             loader.dtsDirectories,
-			knownSymlinks:              knownSymlinks{},
+			knownSymlinks:              symlinks.KnownSymlinks{},
 		}),
 	}
 	return host
@@ -45,7 +46,7 @@ func (h *projectReferenceDtsFakingHost) GetCurrentDirectory() string {
 type projectReferenceDtsFakingVfs struct {
 	projectReferenceFileMapper *projectReferenceFileMapper
 	dtsDirectories             collections.Set[tspath.Path]
-	knownSymlinks              knownSymlinks
+	knownSymlinks              symlinks.KnownSymlinks
 }
 
 var _ vfs.FS = (*projectReferenceDtsFakingVfs)(nil)
@@ -74,7 +75,12 @@ func (fs *projectReferenceDtsFakingVfs) ReadFile(path string) (contents string, 
 }
 
 // WriteFile implements vfs.FS.
-func (fs *projectReferenceDtsFakingVfs) WriteFile(path string, data string, writeByteOrderMark bool) error {
+func (fs *projectReferenceDtsFakingVfs) WriteFile(path string, data string) error {
+	panic("should not be called by resolver")
+}
+
+// AppendFile implements vfs.FS.
+func (fs *projectReferenceDtsFakingVfs) AppendFile(path string, data string) error {
 	panic("should not be called by resolver")
 }
 
@@ -150,7 +156,7 @@ func (fs *projectReferenceDtsFakingVfs) handleDirectoryCouldBeSymlink(directory 
 		// not symlinked
 		return
 	}
-	fs.knownSymlinks.SetDirectory(directory, directoryPath, &knownDirectoryLink{
+	fs.knownSymlinks.SetDirectory(directory, directoryPath, &symlinks.KnownDirectoryLink{
 		Real:     tspath.EnsureTrailingDirectorySeparator(realDirectory),
 		RealPath: realPath,
 	})
@@ -164,12 +170,16 @@ func (fs *projectReferenceDtsFakingVfs) fileOrDirectoryExistsUsingSource(fileOrD
 		return result == core.TSTrue
 	}
 
-	knownDirectoryLinks := fs.knownSymlinks.Directories()
-	if knownDirectoryLinks.Size() == 0 {
-		return false
-	}
 	fileOrDirectoryPath := fs.toPath(fileOrDirectory)
 	if !strings.Contains(string(fileOrDirectoryPath), "/node_modules/") {
+		return false
+	}
+	// Check if the directory or file is a symlinked package
+	if packageRoot := module.ParseNodeModuleFromPath(fileOrDirectory, true /*isFolder*/); packageRoot != "" {
+		fs.handleDirectoryCouldBeSymlink(packageRoot)
+	}
+	knownDirectoryLinks := fs.knownSymlinks.Directories()
+	if knownDirectoryLinks.Size() == 0 {
 		return false
 	}
 	if isFile {
@@ -181,7 +191,7 @@ func (fs *projectReferenceDtsFakingVfs) fileOrDirectoryExistsUsingSource(fileOrD
 
 	// If it contains node_modules check if its one of the symlinked path we know of
 	var exists bool
-	knownDirectoryLinks.Range(func(directoryPath tspath.Path, knownDirectoryLink *knownDirectoryLink) bool {
+	knownDirectoryLinks.Range(func(directoryPath tspath.Path, knownDirectoryLink *symlinks.KnownDirectoryLink) bool {
 		relative, hasPrefix := strings.CutPrefix(string(fileOrDirectoryPath), string(directoryPath))
 		if !hasPrefix {
 			return true
@@ -191,6 +201,7 @@ func (fs *projectReferenceDtsFakingVfs) fileOrDirectoryExistsUsingSource(fileOrD
 				// Store the real path for the file
 				absolutePath := tspath.GetNormalizedAbsolutePath(fileOrDirectory, fs.projectReferenceFileMapper.opts.Host.GetCurrentDirectory())
 				fs.knownSymlinks.SetFile(
+					absolutePath,
 					fileOrDirectoryPath,
 					knownDirectoryLink.Real+absolutePath[len(directoryPath):],
 				)

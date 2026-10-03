@@ -14,6 +14,7 @@ function foo() {
 
 
 //// [index.js]
+"use strict";
 // @ts-nocheck
 function foo() {
     module.exports = exports = function (o) {
@@ -22,10 +23,13 @@ function foo() {
     const m = function () {
         // I have no idea what to put here
     };
-    export var methods = m;
     exports.methods = m;
 }
 
 
 //// [index.d.ts]
-export {};
+export = _exports;
+declare function _exports(o: any): any;
+declare namespace _exports {
+    export var methods: () => void;
+}

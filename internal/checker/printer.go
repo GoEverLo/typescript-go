@@ -1,6 +1,8 @@
 package checker
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/nodebuilder"
@@ -17,8 +19,18 @@ func createPrinterWithRemoveComments(emitContext *printer.EmitContext) *printer.
 }
 
 func createPrinterWithRemoveCommentsOmitTrailingSemicolon(emitContext *printer.EmitContext) *printer.Printer {
-	// TODO: OmitTrailingSemicolon support
-	return printer.NewPrinter(printer.PrinterOptions{RemoveComments: true}, printer.PrintHandlers{}, emitContext)
+	return printer.NewPrinter(printer.PrinterOptions{
+		RemoveComments:        true,
+		OmitTrailingSemicolon: true,
+	}, printer.PrintHandlers{}, emitContext)
+}
+
+func createPrinterWithRemoveCommentsOmitTrailingSemicolonNeverAsciiEscape(emitContext *printer.EmitContext) *printer.Printer {
+	return printer.NewPrinter(printer.PrinterOptions{
+		RemoveComments:        true,
+		OmitTrailingSemicolon: true,
+		NeverAsciiEscape:      true,
+	}, printer.PrintHandlers{}, emitContext)
 }
 
 func createPrinterWithRemoveCommentsNeverAsciiEscape(emitContext *printer.EmitContext) *printer.Printer {
@@ -28,191 +40,78 @@ func createPrinterWithRemoveCommentsNeverAsciiEscape(emitContext *printer.EmitCo
 	}, printer.PrintHandlers{}, emitContext)
 }
 
-type semicolonRemoverWriter struct {
-	hasPendingSemicolon bool
-	inner               printer.EmitTextWriter
-}
-
-func (s *semicolonRemoverWriter) commitSemicolon() {
-	if s.hasPendingSemicolon {
-		s.inner.WriteTrailingSemicolon(";")
-		s.hasPendingSemicolon = false
-	}
-}
-
-func (s *semicolonRemoverWriter) Clear() {
-	s.inner.Clear()
-}
-
-func (s *semicolonRemoverWriter) DecreaseIndent() {
-	s.commitSemicolon()
-	s.inner.DecreaseIndent()
-}
-
-func (s *semicolonRemoverWriter) GetColumn() int {
-	return s.inner.GetColumn()
-}
-
-func (s *semicolonRemoverWriter) GetIndent() int {
-	return s.inner.GetIndent()
-}
-
-func (s *semicolonRemoverWriter) GetLine() int {
-	return s.inner.GetLine()
-}
-
-func (s *semicolonRemoverWriter) GetTextPos() int {
-	return s.inner.GetTextPos()
-}
-
-func (s *semicolonRemoverWriter) HasTrailingComment() bool {
-	return s.inner.HasTrailingComment()
-}
-
-func (s *semicolonRemoverWriter) HasTrailingWhitespace() bool {
-	return s.inner.HasTrailingWhitespace()
-}
-
-func (s *semicolonRemoverWriter) IncreaseIndent() {
-	s.commitSemicolon()
-	s.inner.IncreaseIndent()
-}
-
-func (s *semicolonRemoverWriter) IsAtStartOfLine() bool {
-	return s.inner.IsAtStartOfLine()
-}
-
-func (s *semicolonRemoverWriter) RawWrite(s1 string) {
-	s.commitSemicolon()
-	s.inner.RawWrite(s1)
-}
-
-func (s *semicolonRemoverWriter) String() string {
-	s.commitSemicolon()
-	return s.inner.String()
-}
-
-func (s *semicolonRemoverWriter) Write(s1 string) {
-	s.commitSemicolon()
-	s.inner.Write(s1)
-}
-
-func (s *semicolonRemoverWriter) WriteComment(text string) {
-	s.commitSemicolon()
-	s.inner.WriteComment(text)
-}
-
-func (s *semicolonRemoverWriter) WriteKeyword(text string) {
-	s.commitSemicolon()
-	s.inner.WriteKeyword(text)
-}
-
-func (s *semicolonRemoverWriter) WriteLine() {
-	s.commitSemicolon()
-	s.inner.WriteLine()
-}
-
-func (s *semicolonRemoverWriter) WriteLineForce(force bool) {
-	s.commitSemicolon()
-	s.inner.WriteLineForce(force)
-}
-
-func (s *semicolonRemoverWriter) WriteLiteral(s1 string) {
-	s.commitSemicolon()
-	s.inner.WriteLiteral(s1)
-}
-
-func (s *semicolonRemoverWriter) WriteOperator(text string) {
-	s.commitSemicolon()
-	s.inner.WriteOperator(text)
-}
-
-func (s *semicolonRemoverWriter) WriteParameter(text string) {
-	s.commitSemicolon()
-	s.inner.WriteParameter(text)
-}
-
-func (s *semicolonRemoverWriter) WriteProperty(text string) {
-	s.commitSemicolon()
-	s.inner.WriteProperty(text)
-}
-
-func (s *semicolonRemoverWriter) WritePunctuation(text string) {
-	s.commitSemicolon()
-	s.inner.WritePunctuation(text)
-}
-
-func (s *semicolonRemoverWriter) WriteSpace(text string) {
-	s.commitSemicolon()
-	s.inner.WriteSpace(text)
-}
-
-func (s *semicolonRemoverWriter) WriteStringLiteral(text string) {
-	s.commitSemicolon()
-	s.inner.WriteStringLiteral(text)
-}
-
-func (s *semicolonRemoverWriter) WriteSymbol(text string, symbol *ast.Symbol) {
-	s.commitSemicolon()
-	s.inner.WriteSymbol(text, symbol)
-}
-
-func (s *semicolonRemoverWriter) WriteTrailingSemicolon(text string) {
-	s.hasPendingSemicolon = true
-}
-
-func getTrailingSemicolonDeferringWriter(writer printer.EmitTextWriter) printer.EmitTextWriter {
-	return &semicolonRemoverWriter{false, writer}
-}
-
 func (c *Checker) TypeToString(t *Type) string {
 	return c.typeToString(t, nil)
 }
 
 func (c *Checker) typeToString(t *Type, enclosingDeclaration *ast.Node) string {
-	return c.typeToStringEx(t, enclosingDeclaration, TypeFormatFlagsAllowUniqueESSymbolType|TypeFormatFlagsUseAliasDefinedOutsideCurrentScope)
+	return c.typeToStringEx(t, enclosingDeclaration, TypeFormatFlagsAllowUniqueESSymbolType|TypeFormatFlagsUseAliasDefinedOutsideCurrentScope, nil)
 }
 
 func toNodeBuilderFlags(flags TypeFormatFlags) nodebuilder.Flags {
 	return nodebuilder.Flags(flags & TypeFormatFlagsNodeBuilderFlagsMask)
 }
 
-func (c *Checker) TypeToStringEx(t *Type, enclosingDeclaration *ast.Node, flags TypeFormatFlags) string {
-	return c.typeToStringEx(t, enclosingDeclaration, flags)
+func (c *Checker) TypeToStringEx(t *Type, enclosingDeclaration *ast.Node, flags TypeFormatFlags, vc *VerbosityContext) string {
+	return c.typeToStringEx(t, enclosingDeclaration, flags, vc)
 }
 
-func (c *Checker) typeToStringEx(t *Type, enclosingDeclaration *ast.Node, flags TypeFormatFlags) string {
-	writer := printer.NewTextWriter("")
-	noTruncation := (c.compilerOptions.NoErrorTruncation == core.TSTrue) || (flags&TypeFormatFlagsNoTruncation != 0)
+func (c *Checker) typeToStringEx(t *Type, enclosingDeclaration *ast.Node, flags TypeFormatFlags, vc *VerbosityContext) string {
+	// Serialization of types can lead to (lazy) resolution of members, which can cause diagnostics that again require
+	// serialization of types. This can potentially result in infinite recursion and stack overflows. To prevent that,
+	// after a certain number of recursive invocations the function simply returns "?".
+	if c.serializationLevel >= maxSerializationLevel {
+		return "?"
+	}
+	newLine := ""
+	if flags&TypeFormatFlagsMultilineObjectLiterals != 0 {
+		newLine = "\n"
+	}
+	writer := printer.NewTextWriter(newLine, 0)
+	noTruncation := ((vc == nil || vc.MaxTruncationLength == 0) && c.compilerOptions.NoErrorTruncation == core.TSTrue) || (flags&TypeFormatFlagsNoTruncation != 0)
 	combinedFlags := toNodeBuilderFlags(flags) | nodebuilder.FlagsIgnoreErrors
 	if noTruncation {
 		combinedFlags = combinedFlags | nodebuilder.FlagsNoTruncation
 	}
-	nodeBuilder := c.getNodeBuilder()
+	nodeBuilder, release := c.getNodeBuilder()
+	defer release()
+	oldVerbosity := nodeBuilder.verbosity
+	nodeBuilder.verbosity = vc
+	defer func() {
+		nodeBuilder.verbosity = oldVerbosity
+	}()
+	c.serializationLevel++
 	typeNode := nodeBuilder.TypeToTypeNode(t, enclosingDeclaration, combinedFlags, nodebuilder.InternalFlagsNone, nil)
+	c.serializationLevel--
 	if typeNode == nil {
 		panic("should always get typenode")
 	}
 	// The unresolved type gets a synthesized comment on `any` to hint to users that it's not a plain `any`.
 	// Otherwise, we always strip comments out.
-	var printer *printer.Printer
+	var p *printer.Printer
 	if t == c.unresolvedType {
-		printer = createPrinterWithDefaults(nodeBuilder.EmitContext())
+		p = createPrinterWithDefaults(nodeBuilder.EmitContext())
 	} else {
-		printer = createPrinterWithRemoveComments(nodeBuilder.EmitContext())
+		p = createPrinterWithRemoveComments(nodeBuilder.EmitContext())
 	}
 	var sourceFile *ast.SourceFile
 	if enclosingDeclaration != nil {
 		sourceFile = ast.GetSourceFileOfNode(enclosingDeclaration)
 	}
-	printer.Write(typeNode /*sourceFile*/, sourceFile, writer, nil)
+	p.Write(typeNode, sourceFile, writer, nil)
 	result := writer.String()
 
 	maxLength := defaultMaximumTruncationLength * 2
+	if vc != nil && vc.MaxTruncationLength > 0 {
+		maxLength = vc.MaxTruncationLength * 10 // hard cutoff matching Strada's absoluteMaximumLength
+	}
 	if noTruncation {
 		maxLength = noTruncationMaximumTruncationLength * 2
 	}
 	if maxLength > 0 && result != "" && len(result) >= maxLength {
+		if vc != nil {
+			vc.Truncated = true
+		}
 		return result[0:maxLength-len("...")] + "..."
 	}
 	return result
@@ -252,7 +151,8 @@ func (c *Checker) symbolToStringEx(symbol *ast.Symbol, enclosingDeclaration *ast
 		internalNodeFlags |= nodebuilder.InternalFlagsWriteComputedProps
 	}
 
-	nodeBuilder := c.getNodeBuilder()
+	nodeBuilder, release := c.getNodeBuilder()
+	defer release()
 	var sourceFile *ast.SourceFile
 	if enclosingDeclaration != nil {
 		sourceFile = ast.GetSourceFileOfNode(enclosingDeclaration)
@@ -260,9 +160,9 @@ func (c *Checker) symbolToStringEx(symbol *ast.Symbol, enclosingDeclaration *ast
 	var printer_ *printer.Printer
 	// add neverAsciiEscape for GH#39027
 	if enclosingDeclaration != nil && enclosingDeclaration.Kind == ast.KindSourceFile {
-		printer_ = createPrinterWithRemoveCommentsNeverAsciiEscape(nodeBuilder.EmitContext())
+		printer_ = createPrinterWithRemoveCommentsOmitTrailingSemicolonNeverAsciiEscape(nodeBuilder.EmitContext())
 	} else {
-		printer_ = createPrinterWithRemoveComments(nodeBuilder.EmitContext())
+		printer_ = createPrinterWithRemoveCommentsOmitTrailingSemicolon(nodeBuilder.EmitContext())
 	}
 
 	var builder func(symbol *ast.Symbol, meaning ast.SymbolFlags, enclosingDeclaration *ast.Node, flags nodebuilder.Flags, internalFlags nodebuilder.InternalFlags, tracker nodebuilder.SymbolTracker) *ast.Node
@@ -271,20 +171,20 @@ func (c *Checker) symbolToStringEx(symbol *ast.Symbol, enclosingDeclaration *ast
 	} else {
 		builder = nodeBuilder.SymbolToEntityName
 	}
-	entity := builder(symbol, meaning, enclosingDeclaration, nodeFlags, internalNodeFlags, nil)         // TODO: GH#18217
-	printer_.Write(entity /*sourceFile*/, sourceFile, getTrailingSemicolonDeferringWriter(writer), nil) // TODO: GH#18217
+	entity := builder(symbol, meaning, enclosingDeclaration, nodeFlags, internalNodeFlags, nil) // TODO: GH#18217
+	printer_.Write(entity /*sourceFile*/, sourceFile, writer, nil)                              // TODO: GH#18217
 	return writer.String()
 }
 
 func (c *Checker) signatureToString(signature *Signature) string {
-	return c.signatureToStringEx(signature, nil, TypeFormatFlagsNone)
+	return c.signatureToStringEx(signature, nil, TypeFormatFlagsNone, nil)
 }
 
-func (c *Checker) SignatureToStringEx(signature *Signature, enclosingDeclaration *ast.Node, flags TypeFormatFlags) string {
-	return c.signatureToStringEx(signature, enclosingDeclaration, flags)
+func (c *Checker) SignatureToStringEx(signature *Signature, enclosingDeclaration *ast.Node, flags TypeFormatFlags, vc *VerbosityContext) string {
+	return c.signatureToStringEx(signature, enclosingDeclaration, flags, vc)
 }
 
-func (c *Checker) signatureToStringEx(signature *Signature, enclosingDeclaration *ast.Node, flags TypeFormatFlags) string {
+func (c *Checker) signatureToStringEx(signature *Signature, enclosingDeclaration *ast.Node, flags TypeFormatFlags, vc *VerbosityContext) string {
 	isConstructor := signature.flags&SignatureFlagsConstruct != 0 && flags&TypeFormatFlagsWriteCallStyleSignature == 0
 	var sigOutput ast.Kind
 	if flags&TypeFormatFlagsWriteArrowStyleSignature != 0 {
@@ -300,18 +200,29 @@ func (c *Checker) signatureToStringEx(signature *Signature, enclosingDeclaration
 			sigOutput = ast.KindCallSignature
 		}
 	}
-	writer, putWriter := printer.GetSingleLineStringWriter()
-	defer putWriter()
 
-	nodeBuilder := c.getNodeBuilder()
+	nodeBuilder, release := c.getNodeBuilder()
+	defer release()
+	oldVerbosity := nodeBuilder.verbosity
+	nodeBuilder.verbosity = vc
+	defer func() {
+		nodeBuilder.verbosity = oldVerbosity
+	}()
 	combinedFlags := toNodeBuilderFlags(flags) | nodebuilder.FlagsIgnoreErrors | nodebuilder.FlagsWriteTypeParametersInQualifiedName
 	sig := nodeBuilder.SignatureToSignatureDeclaration(signature, sigOutput, enclosingDeclaration, combinedFlags, nodebuilder.InternalFlagsNone, nil)
-	printer_ := createPrinterWithRemoveCommentsOmitTrailingSemicolon(nodeBuilder.EmitContext())
+	p := createPrinterWithRemoveCommentsOmitTrailingSemicolonNeverAsciiEscape(nodeBuilder.EmitContext())
 	var sourceFile *ast.SourceFile
 	if enclosingDeclaration != nil {
 		sourceFile = ast.GetSourceFileOfNode(enclosingDeclaration)
 	}
-	printer_.Write(sig /*sourceFile*/, sourceFile, getTrailingSemicolonDeferringWriter(writer), nil) // TODO: GH#18217
+	if flags&TypeFormatFlagsMultilineObjectLiterals != 0 {
+		writer := printer.NewTextWriter("\n", 0)
+		p.Write(sig, sourceFile, writer, nil)
+		return writer.String()
+	}
+	writer, putWriter := printer.GetSingleLineStringWriter()
+	defer putWriter()
+	p.Write(sig, sourceFile, writer, nil)
 	return writer.String()
 }
 
@@ -322,7 +233,8 @@ func (c *Checker) typePredicateToString(typePredicate *TypePredicate) string {
 func (c *Checker) typePredicateToStringEx(typePredicate *TypePredicate, enclosingDeclaration *ast.Node, flags TypeFormatFlags) string {
 	writer, putWriter := printer.GetSingleLineStringWriter()
 	defer putWriter()
-	nodeBuilder := c.getNodeBuilder()
+	nodeBuilder, release := c.getNodeBuilder()
+	defer release()
 	combinedFlags := toNodeBuilderFlags(flags) | nodebuilder.FlagsIgnoreErrors | nodebuilder.FlagsWriteTypeParametersInQualifiedName
 	predicate := nodeBuilder.TypePredicateToTypePredicateNode(typePredicate, enclosingDeclaration, combinedFlags, nodebuilder.InternalFlagsNone, nil) // TODO: GH#18217
 	printer_ := createPrinterWithRemoveComments(nodeBuilder.EmitContext())
@@ -338,14 +250,14 @@ func (c *Checker) valueToString(value any) string {
 	return ValueToString(value)
 }
 
-func (c *Checker) formatUnionTypes(types []*Type) []*Type {
+func (c *Checker) formatUnionTypes(types []*Type, expandingEnum bool) []*Type {
 	var result []*Type
 	var flags TypeFlags
 	for i := 0; i < len(types); i++ {
 		t := types[i]
 		flags |= t.flags
 		if t.flags&TypeFlagsNullable == 0 {
-			if t.flags&(TypeFlagsBooleanLiteral|TypeFlagsEnumLike) != 0 {
+			if t.flags&TypeFlagsBooleanLiteral != 0 || (!expandingEnum && t.flags&TypeFlagsEnumLike != 0) {
 				var baseType *Type
 				if t.flags&TypeFlagsBooleanLiteral != 0 {
 					baseType = c.booleanType
@@ -373,12 +285,72 @@ func (c *Checker) formatUnionTypes(types []*Type) []*Type {
 	return result
 }
 
-func (c *Checker) TypeToTypeNode(t *Type, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) *ast.TypeNode {
-	nodeBuilder := c.getNodeBuilder()
+func (c *Checker) TypeToTypeNode(t *Type, enclosingDeclaration *ast.Node, flags nodebuilder.Flags, idToSymbol map[*ast.IdentifierNode]*ast.Symbol) *ast.TypeNode {
+	nodeBuilder := c.getNodeBuilderEx(idToSymbol)
 	return nodeBuilder.TypeToTypeNode(t, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
 }
 
-func (c *Checker) TypePredicateToTypePredicateNode(t *TypePredicate, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) *ast.TypePredicateNodeNode {
-	nodeBuilder := c.getNodeBuilder()
+func (c *Checker) SignatureToSignatureDeclaration(signature *Signature, kind ast.Kind, enclosingDeclaration *ast.Node, flags nodebuilder.Flags) *ast.Node {
+	nodeBuilder, release := c.getNodeBuilder()
+	defer release()
+	return nodeBuilder.SignatureToSignatureDeclaration(signature, kind, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
+}
+
+// ExpandSymbolForHover produces declaration strings for a symbol with verbosity support for expandable hover.
+func (c *Checker) ExpandSymbolForHover(symbol *ast.Symbol, meaning ast.SymbolFlags, vc *VerbosityContext) string {
+	nodeBuilder, release := c.getNodeBuilder()
+	defer release()
+	oldVerbosity := nodeBuilder.verbosity
+	nodeBuilder.verbosity = vc
+	defer func() {
+		nodeBuilder.verbosity = oldVerbosity
+	}()
+	nodes := nodeBuilder.ExpandSymbolForHover(symbol, meaning)
+	if len(nodes) == 0 {
+		return ""
+	}
+	p := createPrinterWithRemoveComments(nodeBuilder.EmitContext())
+	var sourceFile *ast.SourceFile
+	if symbol.ValueDeclaration != nil {
+		sourceFile = ast.GetSourceFileOfNode(symbol.ValueDeclaration)
+	}
+	var b strings.Builder
+	for i, node := range nodes {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(p.Emit(node, sourceFile))
+	}
+	return b.String()
+}
+
+// TypeParameterToStringEx renders a type parameter declaration (e.g. "T extends Foo") with optional verbosity support.
+func (c *Checker) TypeParameterToStringEx(t *Type, enclosingDeclaration *ast.Node, vc *VerbosityContext) string {
+	nodeBuilder, release := c.getNodeBuilder()
+	defer release()
+	oldVerbosity := nodeBuilder.verbosity
+	nodeBuilder.verbosity = vc
+	defer func() {
+		nodeBuilder.verbosity = oldVerbosity
+	}()
+	typeParamNode := nodeBuilder.TypeParameterToDeclaration(t, enclosingDeclaration, nodebuilder.FlagsIgnoreErrors, nodebuilder.InternalFlagsNone, nil)
+	if typeParamNode == nil {
+		return c.TypeToString(t)
+	}
+	p := createPrinterWithRemoveComments(nodeBuilder.EmitContext())
+	var sourceFile *ast.SourceFile
+	if enclosingDeclaration != nil {
+		sourceFile = ast.GetSourceFileOfNode(enclosingDeclaration)
+	}
+	return p.Emit(typeParamNode, sourceFile)
+}
+
+func (c *Checker) TypeToTypeNodeEx(t *Type, enclosingDeclaration *ast.Node, flags nodebuilder.Flags, internalFlags nodebuilder.InternalFlags, idToSymbol map[*ast.IdentifierNode]*ast.Symbol) *ast.TypeNode {
+	nodeBuilder := c.getNodeBuilderEx(idToSymbol)
+	return nodeBuilder.TypeToTypeNode(t, enclosingDeclaration, flags, internalFlags, nil)
+}
+
+func (c *Checker) TypePredicateToTypePredicateNode(t *TypePredicate, enclosingDeclaration *ast.Node, flags nodebuilder.Flags, idToSymbol map[*ast.IdentifierNode]*ast.Symbol) *ast.TypePredicateNodeNode {
+	nodeBuilder := c.getNodeBuilderEx(idToSymbol)
 	return nodeBuilder.TypePredicateToTypePredicateNode(t, enclosingDeclaration, flags, nodebuilder.InternalFlagsNone, nil)
 }

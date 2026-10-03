@@ -3,6 +3,7 @@ package project
 import (
 	"testing"
 
+	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/lsp/lsproto"
 	"github.com/microsoft/typescript-go/internal/tspath"
 	"github.com/microsoft/typescript-go/internal/vfs/vfstest"
@@ -16,6 +17,7 @@ func TestProcessChanges(t *testing.T) {
 		testFS := vfstest.FromMap(map[string]string{
 			"/test1.ts": "// existing content",
 			"/test2.ts": "// existing content",
+			"/script":   "// extensionless content",
 		}, false /* useCaseSensitiveFileNames */)
 		return newOverlayFS(
 			testFS,
@@ -162,6 +164,55 @@ func TestProcessChanges(t *testing.T) {
 		assert.Assert(t, fh.MatchesDiskText())
 	})
 
+	t.Run("open falls back to file extension for unknown language kind", func(t *testing.T) {
+		t.Parallel()
+		fs := createOverlayFS()
+		uri := lsproto.DocumentUri("file:///test1.mts")
+
+		fs.processChanges([]FileChange{
+			{
+				Kind:         FileChangeKindOpen,
+				URI:          uri,
+				Version:      1,
+				Content:      "export const x = 1;",
+				LanguageKind: lsproto.LanguageKind("mts"),
+			},
+		})
+
+		fh := fs.getFile(uri.FileName())
+		assert.Assert(t, fh != nil)
+		assert.Equal(t, fh.Kind(), core.ScriptKindTS)
+	})
+
+	t.Run("open extensionless file preserves unknown script kind", func(t *testing.T) {
+		t.Parallel()
+		fs := createOverlayFS()
+		uri := lsproto.DocumentUri("file:///script")
+
+		fs.processChanges([]FileChange{
+			{
+				Kind:         FileChangeKindOpen,
+				URI:          uri,
+				Version:      1,
+				Content:      "const x = 1;",
+				LanguageKind: lsproto.LanguageKind("plaintext"),
+			},
+		})
+
+		fh := fs.getFile(uri.FileName())
+		assert.Assert(t, fh != nil)
+		assert.Equal(t, fh.Kind(), core.ScriptKindUnknown)
+	})
+
+	t.Run("extensionless disk file preserves unknown script kind", func(t *testing.T) {
+		t.Parallel()
+		fs := createOverlayFS()
+
+		fh := fs.getFile("/script")
+		assert.Assert(t, fh != nil)
+		assert.Equal(t, fh.Kind(), core.ScriptKindUnknown)
+	})
+
 	t.Run("watch change on overlay marks as not matching disk", func(t *testing.T) {
 		t.Parallel()
 		fs := createOverlayFS()
@@ -195,5 +246,61 @@ func TestProcessChanges(t *testing.T) {
 			},
 		})
 		assert.Assert(t, !fs.getFile(testURI1.FileName()).MatchesDiskText())
+	})
+
+	t.Run("save without overlay should not panic", func(t *testing.T) {
+		t.Parallel()
+		fs := createOverlayFS()
+
+		// Save a file that was never opened (no overlay exists).
+		// This can happen when an editor sends didSave for a file
+		// that is not managed by the LSP server (e.g., package.json).
+		result, _ := fs.processChanges([]FileChange{
+			{
+				Kind: FileChangeKindSave,
+				URI:  testURI1,
+			},
+		})
+		// Should be treated as a disk change
+		assert.Assert(t, result.Changed.Has(testURI1))
+	})
+
+	t.Run("close then open in same batch marks as changed", func(t *testing.T) {
+		t.Parallel()
+		fs := createOverlayFS()
+
+		// First create an overlay
+		fs.processChanges([]FileChange{
+			{
+				Kind:         FileChangeKindOpen,
+				URI:          testURI1,
+				Version:      1,
+				Content:      "const x = 1;",
+				LanguageKind: lsproto.LanguageKindTypeScript,
+			},
+		})
+
+		// Now close and reopen in the same batch (like Neovim does for file reload)
+		result, _ := fs.processChanges([]FileChange{
+			{
+				Kind: FileChangeKindClose,
+				URI:  testURI1,
+			},
+			{
+				Kind:         FileChangeKindOpen,
+				URI:          testURI1,
+				Version:      0,
+				Content:      "const x = 2;",
+				LanguageKind: lsproto.LanguageKindTypeScript,
+			},
+		})
+
+		// Should not be marked as opened since it was already open
+		assert.Assert(t, result.Opened == "", "close then open should not mark as opened")
+		// Should also be marked as changed since it was closed and reopened
+		assert.Assert(t, result.Changed.Has(testURI1), "close then open should mark as changed")
+		// Should have the new content
+		fh := fs.getFile(testURI1.FileName())
+		assert.Equal(t, fh.Content(), "const x = 2;")
 	})
 }

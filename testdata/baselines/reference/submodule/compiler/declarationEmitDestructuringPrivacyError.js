@@ -1,18 +1,20 @@
 //// [tests/cases/compiler/declarationEmitDestructuringPrivacyError.ts] ////
 
 //// [declarationEmitDestructuringPrivacyError.ts]
-module m {
+namespace m {
     class c {
     }
     export var [x, y, z] = [10, new c(), 30];
 }
 
 //// [declarationEmitDestructuringPrivacyError.js]
+"use strict";
 var m;
 (function (m) {
+    var _a;
     class c {
     }
-    [m.x, m.y, m.z] = [10, new c(), 30];
+    _a = [10, new c(), 30], m.x = _a[0], m.y = _a[1], m.z = _a[2];
 })(m || (m = {}));
 
 
@@ -20,6 +22,6 @@ var m;
 declare namespace m {
     class c {
     }
-    export var x: number, y: c, z: number;
+    export var [x, y, z]: [number, c, number];
     export {};
 }

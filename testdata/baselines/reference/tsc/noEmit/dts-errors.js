@@ -12,7 +12,7 @@ const a = class { private p = 10; };
 }
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m7[0m - [91merror[0m[90m TS4094: [0mProperty 'p' of exported anonymous class type may not be private or protected.
 
@@ -26,7 +26,7 @@ Output::
 
 Found 1 error in a.ts[90m:1[0m
 
-//// [/home/src/tslibs/TS/Lib/lib.d.ts] *Lib*
+//// [/home/src/tslibs/TS/Lib/lib.es2025.full.d.ts] *Lib*
 /// <reference no-default-lib="true"/>
 interface Boolean {}
 interface Function {}
@@ -55,7 +55,7 @@ declare const console: { log(msg: any): void; };
 Edit [0]:: no change
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m7[0m - [91merror[0m[90m TS4094: [0mProperty 'p' of exported anonymous class type may not be private or protected.
 
@@ -99,6 +99,7 @@ Output::
 declare const a = "hello";
 
 //// [/home/src/projects/project/a.js] *new* 
+"use strict";
 const a = "hello";
 
 
@@ -117,7 +118,7 @@ Edit [5]:: Introduce error
 const a = class { private p = 10; };
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m7[0m - [91merror[0m[90m TS4094: [0mProperty 'p' of exported anonymous class type may not be private or protected.
 
@@ -137,7 +138,7 @@ Found 1 error in a.ts[90m:1[0m
 Edit [6]:: Emit when error
 
 tsgo 
-ExitStatus:: DiagnosticsPresent_OutputsGenerated
+ExitStatus:: DiagnosticsPresent_OutputsSkipped
 Output::
 [96ma.ts[0m:[93m1[0m:[93m7[0m - [91merror[0m[90m TS4094: [0mProperty 'p' of exported anonymous class type may not be private or protected.
 
@@ -151,14 +152,8 @@ Output::
 
 Found 1 error in a.ts[90m:1[0m
 
-//// [/home/src/projects/project/a.d.ts] *modified* 
-declare const a: {
-    new (): {
-        p: number;
-    };
-};
-
 //// [/home/src/projects/project/a.js] *modified* 
+"use strict";
 const a = class {
     p = 10;
 };
@@ -169,7 +164,7 @@ const a = class {
 Edit [7]:: no change
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m7[0m - [91merror[0m[90m TS4094: [0mProperty 'p' of exported anonymous class type may not be private or protected.
 

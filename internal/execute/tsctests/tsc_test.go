@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/testutil/contentmappertest"
 	"github.com/microsoft/typescript-go/internal/testutil/stringtestutil"
 	"github.com/microsoft/typescript-go/internal/vfs/vfstest"
 )
@@ -33,8 +34,31 @@ func TestTscCommandline(t *testing.T) {
 			commandLineArgs: nil,
 		},
 		{
+			subScenario: "adds color when FORCE_COLOR is set",
+			env: map[string]string{
+				"FORCE_COLOR": "true",
+			},
+			commandLineArgs: nil,
+		},
+		{
+			subScenario: "does not add color when NO_COLOR is set even if FORCE_COLOR is set",
+			env: map[string]string{
+				"NO_COLOR":    "true",
+				"FORCE_COLOR": "true",
+			},
+			commandLineArgs: nil,
+		},
+		{
 			subScenario:     "when build not first argument",
 			commandLineArgs: []string{"--verbose", "--build"},
+		},
+		{
+			subScenario: "malformed tsconfig property without value",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": `{"" }`,
+				"/home/src/workspaces/project/index.ts":      "",
+			},
+			commandLineArgs: nil,
 		},
 		{
 			subScenario:     "Initialized TSConfig with files options",
@@ -104,6 +128,23 @@ func TestTscCommandline(t *testing.T) {
 			commandLineArgs: []string{"--lib", "es6 ", "first.ts"},
 		},
 		{
+			subScenario:     "noEmit with type error",
+			files:           FileMap{"/home/src/workspaces/project/index.ts": `x = 5;`},
+			commandLineArgs: []string{"--noEmit", "index.ts"},
+		},
+		{
+			subScenario:     "option diagnostics are suppressed when there are syntactic errors",
+			files:           FileMap{"/home/src/workspaces/project/a.ts": `const x: = 1;`},
+			commandLineArgs: []string{"--strictPropertyInitialization", "--strictNullChecks", "false", "a.ts"},
+		},
+		{
+			subScenario: "non-object config root",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": `[]`,
+			},
+			commandLineArgs: []string{},
+		},
+		{
 			subScenario: "Project is empty string",
 			files: FileMap{
 				"/home/src/workspaces/project/first.ts": `export const a = 1`,
@@ -158,6 +199,22 @@ func TestTscCommandline(t *testing.T) {
 				}`),
 			},
 			commandLineArgs: []string{"-p", "/home/src/workspaces/project"},
+		},
+		{
+			subScenario: "Parse -p with empty tsconfig file",
+			files: FileMap{
+				"/home/src/workspaces/project/first.ts":      `export const a = 1`,
+				"/home/src/workspaces/project/tsconfig.json": ``,
+			},
+			commandLineArgs: []string{"-p", "."},
+		},
+		{
+			subScenario: "compiler option at top level of tsconfig",
+			files: FileMap{
+				"/home/src/workspaces/project/index.ts":      "",
+				"/home/src/workspaces/project/tsconfig.json": `{ "strict": true }`,
+			},
+			commandLineArgs: []string{"--pretty", "false"},
 		},
 		{
 			subScenario:     "Parse enum type options",
@@ -220,6 +277,74 @@ func TestTscCommandline(t *testing.T) {
 	}
 }
 
+func TestTscMissingFiles(t *testing.T) {
+	t.Parallel()
+	testCases := []*tscInput{
+		{
+			subScenario: "file in tsconfig does not exist",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(
+					`{
+					"files": ["./src/doesNotExist.ts"]
+					}`,
+				),
+			},
+			commandLineArgs: []string{"-p", "./tsconfig.json"},
+		},
+		{
+			subScenario: "extensionless file in tsconfig does not exist",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(
+					`{
+					"files": ["./src/doesNotExist"]
+					}`,
+				),
+			},
+			commandLineArgs: []string{"-p", "./tsconfig.json"},
+		},
+		{
+			subScenario: "extensionless file in tsconfig exists",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(
+					`{
+					"files": ["./src/script"]
+					}`,
+				),
+				"/home/src/workspaces/project/src/script": `const n: number = "s";`,
+			},
+			commandLineArgs: []string{"-p", "./tsconfig.json"},
+		},
+		{
+			subScenario: "extensionless file on command line exists",
+			files: FileMap{
+				"/home/src/workspaces/project/script": `const n: number = "s";`,
+			},
+			commandLineArgs: []string{"script"},
+		},
+		{
+			subScenario: "extensionless file in extended tsconfig in different folder does not exist",
+			files: FileMap{
+				"/home/src/workspaces/project/src/tsconfig.json": stringtestutil.Dedent(
+					`{
+					"extends": "./../tsconfig.base.json",
+					}`,
+				),
+				"/home/src/workspaces/project/src/oops.ts": "export const abc = 10;",
+				"/home/src/workspaces/project/tsconfig.base.json": stringtestutil.Dedent(
+					`{
+					"files": ["./oops"],
+					}`,
+				),
+			},
+			commandLineArgs: []string{"-p", "./src/tsconfig.json"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase.run(t, "commandLine")
+	}
+}
+
 func TestTscComposite(t *testing.T) {
 	t.Parallel()
 	testCases := []*tscInput{
@@ -242,7 +367,6 @@ func TestTscComposite(t *testing.T) {
 			commandLineArgs: []string{"--composite", "false"},
 		},
 		{
-			// !!! sheetal null is not reflected in final options
 			subScenario: "when setting composite null on command line",
 			files: FileMap{
 				"/home/src/workspaces/project/src/main.ts": "export const x = 10;",
@@ -578,6 +702,27 @@ func TestTscDeclarationEmit(t *testing.T) {
 			commandLineArgs: []string{"--b", "--verbose"},
 		},
 		{
+			subScenario: "when ts file is referenced through triple slash from another project",
+			files: FileMap{
+				"/home/src/workspaces/solution/include/tsconfig.json": stringtestutil.Dedent(`
+					{
+						"compilerOptions": { "composite": true, "declaration": true },
+					}`),
+				"/home/src/workspaces/solution/include/include.ts": stringtestutil.Dedent(`
+					export const include = 1;`),
+				"/home/src/workspaces/solution/src/tsconfig.json": stringtestutil.Dedent(`
+					{
+						"compilerOptions": { "composite": true, "declaration": true },
+						"references": [{ "path": "../include" }],
+					}`),
+				"/home/src/workspaces/solution/src/main.ts": stringtestutil.Dedent(`
+					/// <reference path="../include/include.ts" preserve="true" />
+					export const main = 23;`),
+			},
+			cwd:             "/home/src/workspaces/solution",
+			commandLineArgs: []string{"--b", "src", "--verbose"},
+		},
+		{
 			subScenario: "when declaration file used inferred type from referenced project",
 			files: FileMap{
 				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
@@ -619,6 +764,47 @@ func TestTscDeclarationEmit(t *testing.T) {
 				`),
 			},
 			commandLineArgs: []string{"--b", "packages/pkg2/tsconfig.json", "--verbose"},
+		},
+		{
+			subScenario: "when inferred export should reuse imported type alias across a module boundary",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+					{
+						"compilerOptions": {
+							"strict": true,
+							"declaration": true,
+							"emitDeclarationOnly": true,
+							"target": "es2022",
+							"module": "esnext",
+						},
+						"files": ["./a.ts", "./factory.ts", "./state.ts"],
+					}`),
+				tscLibPath + "/lib.es2022.full.d.ts": tscDefaultLibContent + "\n" + stringtestutil.Dedent(`
+					type Partial<T> = {
+						[K in keyof T]?: T[K];
+					};
+				`),
+				"/home/src/workspaces/project/a.ts": stringtestutil.Dedent(`
+					interface ISettings {
+						age: number;
+					}
+
+					export type Settings = Partial<ISettings>;
+				`),
+				"/home/src/workspaces/project/factory.ts": stringtestutil.Dedent(`
+					import type { Settings } from "./a";
+
+					export const makeObj = () => ({
+						fn: (s?: Settings): Settings | undefined => s,
+					});
+				`),
+				"/home/src/workspaces/project/state.ts": stringtestutil.Dedent(`
+					import { makeObj } from "./factory";
+
+					export const obj = makeObj();
+				`),
+			},
+			commandLineArgs: []string{"--p", "tsconfig.json"},
 		},
 		{
 			subScenario:     "reports dts generation errors",
@@ -710,7 +896,6 @@ func TestTscDeclarationEmit(t *testing.T) {
 			commandLineArgs:  []string{"-p", "D:\\Work\\pkg1", "--explainFiles"},
 		},
 		{
-			// !!! sheetal redirected files not yet implemented
 			subScenario: "when same version is referenced through source and another symlinked package",
 			files: FileMap{
 				`/user/username/projects/myproject/plugin-two/index.d.ts`:                               pluginTwoDts(),
@@ -727,7 +912,6 @@ func TestTscDeclarationEmit(t *testing.T) {
 			commandLineArgs: []string{"-p", "plugin-one", "--explainFiles"},
 		},
 		{
-			// !!! sheetal redirected files not yet implemented
 			subScenario: "when same version is referenced through source and another symlinked package with indirect link",
 			files: FileMap{
 				`/user/username/projects/myproject/plugin-two/package.json`: stringtestutil.Dedent(`
@@ -935,12 +1119,52 @@ func TestTscExtends(t *testing.T) {
 			edits:           edits,
 		}
 	}
+	getTscExtendsNonStringPathTestCase := func(propertyName string) *tscInput {
+		return &tscInput{
+			subScenario: "extends config with non-string " + propertyName,
+			files: FileMap{
+				"/home/src/projects/project/tsconfig.json": stringtestutil.Dedent(`
+					{
+						"extends": "./base.json",
+					}`),
+				"/home/src/projects/project/base.json": stringtestutil.Dedent(`
+					{
+						"` + propertyName + `": [1],
+					}`),
+				"/home/src/projects/project/main.ts": `export const x = 1;`,
+			},
+			cwd:             "/home/src/projects/project",
+			commandLineArgs: []string{"-p", "tsconfig.json", "--pretty", "false"},
+		}
+	}
+	getTscExtendsBase := func(baseContents string) FileMap {
+		return FileMap{
+			"/home/src/projects/project/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"extends": "./base.json",
+				}`),
+			"/home/src/projects/project/base.json": stringtestutil.Dedent(baseContents),
+			"/home/src/projects/project/main.ts":   `export const x = 1;`,
+		}
+	}
 	testCases := []*tscInput{
 		{
 			subScenario:     "when building solution with projects extends config with include",
 			files:           getBuildConfigFileExtendsFileMap(),
 			cwd:             "/home/src/workspaces/solution",
 			commandLineArgs: []string{"--b", "--v", "--listFiles"},
+		},
+		getTscExtendsNonStringPathTestCase("include"),
+		getTscExtendsNonStringPathTestCase("exclude"),
+		getTscExtendsNonStringPathTestCase("files"),
+		{
+			subScenario: "extends config with mixed valid and non-string include",
+			files: getTscExtendsBase(`
+				{
+					"include": ["main.ts", 1],
+				}`),
+			cwd:             "/home/src/projects/project",
+			commandLineArgs: []string{"-p", "tsconfig.json", "--pretty", "false"},
 		},
 		{
 			subScenario:     "when building project uses reference and both extend config with include",
@@ -969,7 +1193,6 @@ func TestTscExtends(t *testing.T) {
 								"types": [],
 							},
 						}`),
-						false,
 					)
 				},
 			},
@@ -978,6 +1201,146 @@ func TestTscExtends(t *testing.T) {
 
 	for _, test := range testCases {
 		test.run(t, "extends")
+	}
+}
+
+func TestForceConsistentCasingInFileNames(t *testing.T) {
+	t.Parallel()
+	testCases := []*tscInput{
+		{
+			subScenario: "with relative and non relative file resolutions",
+			files: FileMap{
+				"/user/username/projects/myproject/src/struct.d.ts": stringtestutil.Dedent(`
+                    import * as xs1 from "fp-ts/lib/Struct";
+                    import * as xs2 from "fp-ts/lib/struct";
+                    import * as xs3 from "./Struct";
+                    import * as xs4 from "./struct";
+                `),
+				"/user/username/projects/myproject/node_modules/fp-ts/lib/struct.d.ts": `export function foo(): void`,
+			},
+			cwd:             "/user/username/projects/myproject",
+			commandLineArgs: []string{"/user/username/projects/myproject/src/struct.d.ts", "--forceConsistentCasingInFileNames", "--explainFiles"},
+			ignoreCase:      true,
+		},
+		{
+			subScenario: "when file is included from multiple places with different casing",
+			files: FileMap{
+				"/home/src/projects/project/src/struct.d.ts": stringtestutil.Dedent(`
+					import * as xs1 from "fp-ts/lib/Struct";
+					import * as xs2 from "fp-ts/lib/struct";
+					import * as xs3 from "./Struct";
+					import * as xs4 from "./struct";
+				`),
+				"/home/src/projects/project/src/anotherFile.ts": stringtestutil.Dedent(`
+					import * as xs1 from "fp-ts/lib/Struct";
+					import * as xs2 from "fp-ts/lib/struct";
+					import * as xs3 from "./Struct";
+					import * as xs4 from "./struct";
+				`),
+				"/home/src/projects/project/src/oneMore.ts": stringtestutil.Dedent(`
+					import * as xs1 from "fp-ts/lib/Struct";
+					import * as xs2 from "fp-ts/lib/struct";
+					import * as xs3 from "./Struct";
+					import * as xs4 from "./struct";
+				`),
+				"/home/src/projects/project/tsconfig.json":                      `{}`,
+				"/home/src/projects/project/node_modules/fp-ts/lib/struct.d.ts": `export function foo(): void`,
+			},
+			cwd:             "/home/src/projects/project",
+			commandLineArgs: []string{"--explainFiles"},
+			ignoreCase:      true,
+		},
+		{
+			subScenario: "with type ref from file",
+			files: FileMap{
+				"/user/username/projects/myproject/src/fileOne.d.ts": `declare class c { }`,
+				"/user/username/projects/myproject/src/file2.d.ts": stringtestutil.Dedent(`
+                    /// <reference types="./fileOne.d.ts"/>
+                    declare const y: c;
+                `),
+				"/user/username/projects/myproject/tsconfig.json": "{ }",
+			},
+			cwd:             "/user/username/projects/myproject",
+			commandLineArgs: []string{"-p", "/user/username/projects/myproject", "--explainFiles", "--traceResolution"},
+			ignoreCase:      true,
+		},
+		{
+			subScenario: "with triple slash ref from file",
+			files: FileMap{
+				"/home/src/workspaces/project/src/c.ts":      `/// <reference path="./D.ts"/>`,
+				"/home/src/workspaces/project/src/d.ts":      `declare class c { }`,
+				"/home/src/workspaces/project/tsconfig.json": "{ }",
+			},
+			ignoreCase: true,
+		},
+		{
+			subScenario: "two files exist on disk that differs only in casing",
+			files: FileMap{
+				"/home/src/workspaces/project/c.ts": `import {x} from "./D"`,
+				"/home/src/workspaces/project/D.ts": `export const x = 10;`,
+				"/home/src/workspaces/project/d.ts": `export const y = 20;`,
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+					{
+						"files": ["c.ts", "d.ts"]
+					}`),
+			},
+		},
+	}
+	for _, test := range testCases {
+		test.run(t, "forceConsistentCasingInFileNames")
+	}
+}
+
+func TestTscIgnoreConfig(t *testing.T) {
+	t.Parallel()
+	filesWithoutConfig := func() FileMap {
+		return FileMap{
+			"/home/src/workspaces/project/src/a.ts": "export const a = 10;",
+			"/home/src/workspaces/project/src/b.ts": "export const b = 10;",
+			"/home/src/workspaces/project/c.ts":     "export const c = 10;",
+		}
+	}
+	filesWithConfig := func() FileMap {
+		files := filesWithoutConfig()
+		files["/home/src/workspaces/project/tsconfig.json"] = stringtestutil.Dedent(`
+			{
+                "include": ["src"],
+			}`)
+		return files
+	}
+	getScenarios := func(subScenario string, commandLineArgs []string) []*tscInput {
+		commandLineArgsIgnoreConfig := append(commandLineArgs, "--ignoreConfig")
+		return []*tscInput{
+			{
+				subScenario:     subScenario,
+				files:           filesWithConfig(),
+				commandLineArgs: commandLineArgs,
+			},
+			{
+				subScenario:     subScenario + " with --ignoreConfig",
+				files:           filesWithConfig(),
+				commandLineArgs: commandLineArgsIgnoreConfig,
+			},
+			{
+				subScenario:     subScenario + " when config file absent",
+				files:           filesWithoutConfig(),
+				commandLineArgs: commandLineArgs,
+			},
+			{
+				subScenario:     subScenario + " when config file absent with --ignoreConfig",
+				files:           filesWithoutConfig(),
+				commandLineArgs: commandLineArgsIgnoreConfig,
+			},
+		}
+	}
+	testCases := slices.Concat(
+		getScenarios("without any options", nil),
+		getScenarios("specifying files", []string{"src/a.ts"}),
+		getScenarios("specifying project", []string{"-p", "."}),
+		getScenarios("mixing project and files", []string{"-p", ".", "src/a.ts", "c.ts"}),
+	)
+	for _, test := range testCases {
+		test.run(t, "ignoreConfig")
 	}
 }
 
@@ -1291,7 +1654,7 @@ func TestTscIncremental(t *testing.T) {
 				{
 					caption: "Add new file and update main file",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError(`/home/src/workspaces/project/src/newFile.ts`, "function foo() { return 20; }", false)
+						sys.writeFileNoError(`/home/src/workspaces/project/src/newFile.ts`, "function foo() { return 20; }")
 						sys.prependFile(
 							`/home/src/workspaces/project/src/main.ts`,
 							`/// <reference path="./newFile.ts"/>
@@ -1303,7 +1666,7 @@ func TestTscIncremental(t *testing.T) {
 				{
 					caption: "Write file that could not be resolved",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError(`/home/src/workspaces/project/src/fileNotFound.ts`, "function something2() { return 20; }", false)
+						sys.writeFileNoError(`/home/src/workspaces/project/src/fileNotFound.ts`, "function something2() { return 20; }")
 					},
 				},
 				{
@@ -1390,9 +1753,8 @@ func TestTscIncremental(t *testing.T) {
 				{
 					caption: "Modify imports used in global file",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/workspaces/project/constants.ts", "export default 2;", false)
+						sys.writeFileNoError("/home/src/workspaces/project/constants.ts", "export default 2;")
 					},
-					expectedDiff: "Currently there is issue with d.ts emit for export default = 1 to widen in dts which is why we are not re-computing errors and results in incorrect error reporting",
 				},
 			},
 		},
@@ -1416,9 +1778,8 @@ func TestTscIncremental(t *testing.T) {
 				{
 					caption: "Modify imports used in global file",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/workspaces/project/constants.ts", "export default 2;", false)
+						sys.writeFileNoError("/home/src/workspaces/project/constants.ts", "export default 2;")
 					},
-					expectedDiff: "Currently there is issue with d.ts emit for export default = 1 to widen in dts which is why we are not re-computing errors and results in incorrect error reporting",
 				},
 			},
 		},
@@ -1691,6 +2052,220 @@ func TestTscIncremental(t *testing.T) {
 					commandLineArgs: []string{"-b", "-v"},
 				},
 			},
+		},
+		{
+			subScenario:     "Compile incremental with case insensitive file names",
+			commandLineArgs: []string{"-p", "."},
+			files: FileMap{
+				"/home/project/tsconfig.json": stringtestutil.Dedent(`
+					{
+						"compilerOptions": {
+							"incremental": true
+						},
+					}`),
+				"/home/project/src/index.ts": stringtestutil.Dedent(`
+					import type { Foo1 } from 'lib1';
+					import type { Foo2 } from 'lib2';
+					export const foo1: Foo1 = { foo: "a" };
+					export const foo2: Foo2 = { foo: "b" };`),
+				"/home/node_modules/lib1/index.d.ts": stringtestutil.Dedent(`
+					import type { Foo } from 'someLib';
+					export type { Foo as Foo1 };`),
+				"/home/node_modules/lib1/package.json": stringtestutil.Dedent(`
+					{
+						"name": "lib1"
+					}`),
+				"/home/node_modules/lib2/index.d.ts": stringtestutil.Dedent(`
+					import type { Foo } from 'somelib';
+					export type { Foo as Foo2 };
+					export declare const foo2: Foo;`),
+				"/home/node_modules/lib2/package.json": stringtestutil.Dedent(`
+					{
+						"name": "lib2"
+					}
+					`),
+				"/home/node_modules/someLib/index.d.ts": stringtestutil.Dedent(`
+					import type { Str } from 'otherLib';
+					export type Foo = { foo: Str; };`),
+				"/home/node_modules/someLib/package.json": stringtestutil.Dedent(`
+					{
+						"name": "somelib"
+					}`),
+				"/home/node_modules/otherLib/index.d.ts": stringtestutil.Dedent(`
+					export type Str = string;`),
+				"/home/node_modules/otherLib/package.json": stringtestutil.Dedent(`
+					{
+						"name": "otherlib"
+					}`),
+			},
+			cwd:        "/home/project",
+			ignoreCase: true,
+		},
+		{
+			subScenario: "const enums with refCycle",
+			files: FileMap{
+				"/home/src/workspaces/project/file.ts": stringtestutil.Dedent(`
+					import {A} from "./c"
+					let a = A.ONE
+				`),
+				"/home/src/workspaces/project/b.ts": stringtestutil.Dedent(`
+					import { AWorker } from "./aworker"
+					import { A as ACycle } from "./c"
+					export const enum A {
+						ONE = 1
+					}
+				`),
+				"/home/src/workspaces/project/c.ts": stringtestutil.Dedent(`
+					import {A} from "./b"
+					let b = A.ONE
+					export {A}
+				`),
+				"/home/src/workspaces/project/aworker.ts": stringtestutil.Dedent(`
+					export const AWorker  = 10
+				`),
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"composite": true,
+					}
+				}`),
+			},
+			commandLineArgs: []string{},
+			edits: []*tscEdit{
+				{
+					caption: "change aworker",
+					edit: func(sys *TestSys) {
+						sys.replaceFileText("/home/src/workspaces/project/aworker.ts", "10", "20")
+					},
+				},
+				{
+					caption: "change aworker and enum value",
+					edit: func(sys *TestSys) {
+						sys.replaceFileText("/home/src/workspaces/project/aworker.ts", "20", "30")
+						sys.replaceFileText("/home/src/workspaces/project/b.ts", "1", "2")
+					},
+				},
+			},
+		},
+		{
+			subScenario: "internal symbolname in tsbuildInfo",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"target": "es2017",
+						"strict": true,
+						"esModuleInterop": true
+					}
+				}`),
+				"/home/src/workspaces/project/a.ts": stringtestutil.Dedent(`
+					const createFileListFromFiles = (files: File[]): FileList => {
+					const fileList: FileList = {
+						length: files.length,
+						item: (index: number): File | null => files[index] || null,
+						[Symbol.iterator]: function* (): IterableIterator<File> {
+						for (const file of files) yield file;
+						},
+						...files,
+					} as unknown as FileList;
+
+					return fileList;
+					};
+				`),
+				getTestLibPathFor("es2015.iterable"): stringtestutil.Dedent(`
+					interface SymbolConstructor {
+						readonly iterator: unique symbol;
+					}
+					interface IteratorYieldResult<TYield> {
+						done?: false;
+						value: TYield;
+					}
+					interface IteratorReturnResult<TReturn> {
+						done: true;
+						value: TReturn;
+					}
+					type IteratorResult<T, TReturn = any> = IteratorYieldResult<T> | IteratorReturnResult<TReturn>;
+					interface Iterator<T, TReturn = any, TNext = any> {
+						// NOTE: 'next' is defined using a tuple to ensure we report the correct assignability errors in all places.
+						next(...[value]: [] | [TNext]): IteratorResult<T, TReturn>;
+						return?(value?: TReturn): IteratorResult<T, TReturn>;
+						throw?(e?: any): IteratorResult<T, TReturn>;
+					}
+					interface Iterable<T, TReturn = any, TNext = any> {
+						[Symbol.iterator](): Iterator<T, TReturn, TNext>;
+					}
+					interface IterableIterator<T, TReturn = any, TNext = any> extends Iterator<T, TReturn, TNext> {
+						[Symbol.iterator](): IterableIterator<T, TReturn, TNext>;
+					}
+					interface IteratorObject<T, TReturn = unknown, TNext = unknown> extends Iterator<T, TReturn, TNext> {
+						[Symbol.iterator](): IteratorObject<T, TReturn, TNext>;
+					}
+					type BuiltinIteratorReturn = intrinsic;
+					interface ArrayIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+						[Symbol.iterator](): ArrayIterator<T>;
+					}
+					interface Array<T> {
+						[Symbol.iterator](): ArrayIterator<T>;
+						entries(): ArrayIterator<[number, T]>;
+						keys(): ArrayIterator<number>;
+						values(): ArrayIterator<T>;
+					}
+				`),
+				getTestLibPathFor("es2017.full"): stringtestutil.Dedent(`
+					/// <reference lib="es2015.iterable"/>
+					interface File {
+					}
+					interface FileList {
+						readonly length: number;
+						item(index: number): File | null;
+						[index: number]: File;
+						[Symbol.iterator](): ArrayIterator<File>;
+					}
+				`) + tscDefaultLibContent,
+			},
+			commandLineArgs: []string{""},
+			edits: []*tscEdit{
+				noChange,
+				{
+					caption:         "no change with incremental",
+					commandLineArgs: []string{"--incremental"},
+				},
+				{
+					caption:         "no change with incremental that reads buildInfo",
+					commandLineArgs: []string{"--incremental"},
+				},
+			},
+		},
+		{
+			subScenario: "js file with import in jsdoc in composite project",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": `{"compilerOptions": {"allowJs": true, "composite": true}}`,
+				"/home/src/workspaces/project/index.js": stringtestutil.Dedent(`
+					test("", async function () {
+					  ;(/** @type {typeof import("a")} */ ({}))
+					})
+
+					test("", async function () {
+					  ;(/** @type {typeof import("a")} */ a)
+					})
+
+					test("", async function () {
+					  (/** @type {typeof import("a")} */ ({}))
+					  ;(/** @type {typeof import("a")} */ ({}))
+					})
+
+					test("", async function () {
+					  (/** @type {typeof import("a")} */ a)
+					  ;(/** @type {typeof import("a")} */ a)
+					})
+
+					test("", async function () {
+					  (/** @type {typeof import("a")} */ ({}))
+					  ;(/** @type {typeof import("a")} */ ({}))
+					})
+				`),
+			},
+			commandLineArgs: []string{"--noEmit"},
 		},
 	}
 
@@ -2249,7 +2824,6 @@ func TestTscModuleResolution(t *testing.T) {
 							"target": "es5",
 							"module": "esnext",
 							"lib": ["ES5"],
-							"moduleResolution": "node",
 							"outDir": "dist",
 						},
 						"include": ["src"],
@@ -2304,8 +2878,6 @@ func TestTscModuleResolution(t *testing.T) {
 					edit: func(sys *TestSys) {
 						sys.removeNoError("/home/src/workspaces/project/package.json")
 					},
-					// !!! repopulateInfo on diagnostics not yet implemented
-					expectedDiff: "Currently we arent repopulating error chain so errors will be different",
 				},
 			},
 		},
@@ -2356,53 +2928,47 @@ func TestTscModuleResolution(t *testing.T) {
 					edit: func(sys *TestSys) {
 						sys.removeNoError("/home/src/projects/project/node_modules/@types/bar/index.d.ts")
 					},
-					// !!! repopulateInfo on diagnostics not yet implemented
-					expectedDiff: "Currently we arent repopulating error chain so errors will be different",
 				},
 				{
 					caption: "delete the node10Result in package/types",
 					edit: func(sys *TestSys) {
 						sys.removeNoError("/home/src/projects/project/node_modules/foo/index.d.ts")
 					},
-					// !!! repopulateInfo on diagnostics not yet implemented
-					expectedDiff: "Currently we arent repopulating error chain so errors will be different",
 				},
 				{
 					caption: "add the alternateResult in @types",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar/index.d.ts", getTscModuleResolutionAlternateResultDts("bar"), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar/index.d.ts", getTscModuleResolutionAlternateResultDts("bar"))
 					},
-					// !!! repopulateInfo on diagnostics not yet implemented
-					expectedDiff: "Currently we arent repopulating error chain so errors will be different",
 				},
 				{
 					caption: "add the alternateResult in package/types",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/foo/index.d.ts", getTscModuleResolutionAlternateResultDts("foo"), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/foo/index.d.ts", getTscModuleResolutionAlternateResultDts("foo"))
 					},
 				},
 				{
 					caption: "update package.json from @types so error is fixed",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar/package.json", getTscModuleResolutionAlternateResultAtTypesPackageJson("bar" /*addTypesCondition*/, true), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar/package.json", getTscModuleResolutionAlternateResultAtTypesPackageJson("bar" /*addTypesCondition*/, true))
 					},
 				},
 				{
 					caption: "update package.json so error is fixed",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/foo/package.json", getTscModuleResolutionAlternateResultPackageJson("foo" /*addTypes*/, true /*addTypesCondition*/, true), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/foo/package.json", getTscModuleResolutionAlternateResultPackageJson("foo" /*addTypes*/, true /*addTypesCondition*/, true))
 					},
 				},
 				{
 					caption: "update package.json from @types so error is introduced",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar2/package.json", getTscModuleResolutionAlternateResultAtTypesPackageJson("bar2" /*addTypesCondition*/, false), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar2/package.json", getTscModuleResolutionAlternateResultAtTypesPackageJson("bar2" /*addTypesCondition*/, false))
 					},
 				},
 				{
 					caption: "update package.json so error is introduced",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/foo2/package.json", getTscModuleResolutionAlternateResultPackageJson("foo2" /*addTypes*/, true /*addTypesCondition*/, false), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/foo2/package.json", getTscModuleResolutionAlternateResultPackageJson("foo2" /*addTypes*/, true /*addTypesCondition*/, false))
 					},
 				},
 				{
@@ -2410,29 +2976,23 @@ func TestTscModuleResolution(t *testing.T) {
 					edit: func(sys *TestSys) {
 						sys.removeNoError("/home/src/projects/project/node_modules/@types/bar2/index.d.ts")
 					},
-					// !!! repopulateInfo on diagnostics not yet implemented
-					expectedDiff: "Currently we arent repopulating error chain so errors will be different",
 				},
 				{
 					caption: "delete the node10Result in package/types",
 					edit: func(sys *TestSys) {
 						sys.removeNoError("/home/src/projects/project/node_modules/foo2/index.d.ts")
 					},
-					// !!! repopulateInfo on diagnostics not yet implemented
-					expectedDiff: "Currently we arent repopulating error chain so errors will be different",
 				},
 				{
 					caption: "add the alternateResult in @types",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar2/index.d.ts", getTscModuleResolutionAlternateResultDts("bar2"), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/@types/bar2/index.d.ts", getTscModuleResolutionAlternateResultDts("bar2"))
 					},
-					// !!! repopulateInfo on diagnostics not yet implemented
-					expectedDiff: "Currently we arent repopulating error chain so errors will be different",
 				},
 				{
 					caption: "add the ndoe10Result in package/types",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/projects/project/node_modules/foo2/index.d.ts", getTscModuleResolutionAlternateResultDts("foo2"), false)
+						sys.writeFileNoError("/home/src/projects/project/node_modules/foo2/index.d.ts", getTscModuleResolutionAlternateResultDts("foo2"))
 					},
 				},
 			},
@@ -2533,7 +3093,6 @@ func TestTscModuleResolution(t *testing.T) {
 					edit: func(sys *TestSys) {
 						sys.replaceFileText(`/user/username/projects/myproject/packages/pkg1/package.json`, `"module"`, `"commonjs"`)
 					},
-					expectedDiff: "Package.json watch pending, so no change detected yet",
 				},
 				{
 					caption: "removes those errors when a package file is changed back",
@@ -2546,7 +3105,6 @@ func TestTscModuleResolution(t *testing.T) {
 					edit: func(sys *TestSys) {
 						sys.replaceFileText(`/user/username/projects/myproject/packages/pkg1/package.json`, `"module"`, `"commonjs"`)
 					},
-					expectedDiff: "Package.json watch pending, so no change detected yet",
 				},
 				{
 					caption: "removes those errors when a package file is changed to cjs extensions",
@@ -2602,12 +3160,80 @@ func TestTscModuleResolution(t *testing.T) {
 					edit: func(sys *TestSys) {
 						sys.replaceFileText(`/user/username/projects/myproject/packages/pkg2/package.json`, `index.js`, `other.js`)
 					},
-					expectedDiff: "Package.json watch pending, so no change detected yet",
 				},
 				{
 					caption: "removes those errors when a package file is changed back",
 					edit: func(sys *TestSys) {
 						sys.replaceFileText(`/user/username/projects/myproject/packages/pkg2/package.json`, `other.js`, `index.js`)
+					},
+				},
+			},
+		},
+		{
+			subScenario: `build mode watches missing package-json lookups`,
+			files: FileMap{
+				`/user/username/projects/myproject/packages/pkg1/index.ts`: stringtestutil.Dedent(`
+					import type { TheNum } from 'pkg2'
+					export const theNum: TheNum = 42;`),
+				`/user/username/projects/myproject/packages/pkg1/tsconfig.json`: stringtestutil.Dedent(`
+					{
+						"compilerOptions": {
+							"outDir": "build",
+						},
+					}`),
+			},
+			cwd:             "/user/username/projects/myproject",
+			commandLineArgs: []string{"-b", "packages/pkg1", "-w", "--verbose", "--traceResolution"},
+			edits: []*tscEdit{
+				{
+					caption: "resolves import after package is installed",
+					edit: func(sys *TestSys) {
+						sys.writeFileNoError(`/user/username/projects/myproject/node_modules/pkg2/package.json`, stringtestutil.Dedent(`
+							{
+								"name": "pkg2",
+								"version": "1.0.0",
+								"types": "index.d.ts"
+							}`))
+						sys.writeFileNoError(`/user/username/projects/myproject/node_modules/pkg2/index.d.ts`, `export type TheNum = 42;`)
+					},
+				},
+				{
+					caption: "reports import errors after package is removed",
+					edit: func(sys *TestSys) {
+						sys.removeNoError(`/user/username/projects/myproject/node_modules/pkg2/package.json`)
+						sys.removeNoError(`/user/username/projects/myproject/node_modules/pkg2/index.d.ts`)
+					},
+				},
+			},
+		},
+		{
+			subScenario: `build mode watches package-json lookups from existing buildinfo`,
+			files: GetFileMapWithBuild(FileMap{
+				`/user/username/projects/myproject/packages/pkg1/index.ts`: stringtestutil.Dedent(`
+					import type { TheNum } from 'pkg2'
+					export const theNum: TheNum = 42;`),
+				`/user/username/projects/myproject/packages/pkg1/tsconfig.json`: stringtestutil.Dedent(`
+					{
+						"compilerOptions": {
+							"outDir": "zzbuild",
+						},
+					}`),
+				`/user/username/projects/myproject/node_modules/pkg2/package.json`: stringtestutil.Dedent(`
+					{
+						"name": "pkg2",
+						"version": "1.0.0",
+						"types": "index.d.ts"
+					}`),
+				`/user/username/projects/myproject/node_modules/pkg2/index.d.ts`: `export type TheNum = 42;`,
+			}, []string{"-b", "/user/username/projects/myproject/packages/pkg1", "--verbose", "--traceResolution"}),
+			cwd:             "/user/username/projects/myproject",
+			commandLineArgs: []string{"-b", "packages/pkg1", "-w", "--verbose", "--traceResolution"},
+			edits: []*tscEdit{
+				{
+					caption: "reports import errors after package is removed",
+					edit: func(sys *TestSys) {
+						sys.removeNoError(`/user/username/projects/myproject/node_modules/pkg2/package.json`)
+						sys.removeNoError(`/user/username/projects/myproject/node_modules/pkg2/index.d.ts`)
 					},
 				},
 			},
@@ -2689,13 +3315,13 @@ func TestTscNoCheck(t *testing.T) {
 		fixErrorNoCheck := &tscEdit{
 			caption: "Fix `a` error with noCheck",
 			edit: func(sys *TestSys) {
-				sys.writeFileNoError("/home/src/workspaces/project/a.ts", `export const a = "hello";`, false)
+				sys.writeFileNoError("/home/src/workspaces/project/a.ts", `export const a = "hello";`)
 			},
 		}
 		addErrorNoCheck := &tscEdit{
 			caption: "Introduce error with noCheck",
 			edit: func(sys *TestSys) {
-				sys.writeFileNoError("/home/src/workspaces/project/a.ts", scenario.aText, false)
+				sys.writeFileNoError("/home/src/workspaces/project/a.ts", scenario.aText)
 			},
 		}
 		return &tscInput{
@@ -2727,7 +3353,7 @@ func TestTscNoCheck(t *testing.T) {
 				{
 					caption: "Add file with error",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/home/src/workspaces/project/c.ts", `export const c: number = "hello";`, false)
+						sys.writeFileNoError("/home/src/workspaces/project/c.ts", `export const c: number = "hello";`)
 					},
 					commandLineArgs: commandLineArgs,
 				},
@@ -2850,7 +3476,7 @@ func TestTscNoEmit(t *testing.T) {
 					{
 						caption: "Fix error",
 						edit: func(sys *TestSys) {
-							sys.writeFileNoError("/home/src/projects/project/a.ts", fixedATsContent, false)
+							sys.writeFileNoError("/home/src/projects/project/a.ts", fixedATsContent)
 						},
 					},
 					noChange,
@@ -2862,7 +3488,7 @@ func TestTscNoEmit(t *testing.T) {
 					{
 						caption: "Introduce error",
 						edit: func(sys *TestSys) {
-							sys.writeFileNoError("/home/src/projects/project/a.ts", scenario.aText, false)
+							sys.writeFileNoError("/home/src/projects/project/a.ts", scenario.aText)
 						},
 					},
 					{
@@ -2887,7 +3513,7 @@ func TestTscNoEmit(t *testing.T) {
 					{
 						caption: "Fix error",
 						edit: func(sys *TestSys) {
-							sys.writeFileNoError("/home/src/projects/project/a.ts", fixedATsContent, false)
+							sys.writeFileNoError("/home/src/projects/project/a.ts", fixedATsContent)
 						},
 					},
 					{
@@ -2905,7 +3531,7 @@ func TestTscNoEmit(t *testing.T) {
 					{
 						caption: "Introduce error",
 						edit: func(sys *TestSys) {
-							sys.writeFileNoError("/home/src/projects/project/a.ts", scenario.aText, false)
+							sys.writeFileNoError("/home/src/projects/project/a.ts", scenario.aText)
 						},
 					},
 					{
@@ -3181,13 +3807,13 @@ func TestTscNoEmit(t *testing.T) {
 				{
 					caption: "No change",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError(`/user/username/projects/myproject/a.js`, sys.readFileNoError(`/user/username/projects/myproject/a.js`), false)
+						sys.writeFileNoError(`/user/username/projects/myproject/a.js`, sys.readFileNoError(`/user/username/projects/myproject/a.js`))
 					},
 				},
 				{
 					caption: "change",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError(`/user/username/projects/myproject/a.js`, "const x = 10;", false)
+						sys.writeFileNoError(`/user/username/projects/myproject/a.js`, "const x = 10;")
 					},
 				},
 			},
@@ -3266,7 +3892,7 @@ func TestTscNoEmitOnError(t *testing.T) {
 				{
 					caption: "Fix error",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/user/username/projects/noEmitOnError/src/main.ts", scenario.fixedErrorContent, false)
+						sys.writeFileNoError("/user/username/projects/noEmitOnError/src/main.ts", scenario.fixedErrorContent)
 					},
 				},
 				noChange,
@@ -3312,27 +3938,28 @@ func TestTscNoEmitOnError(t *testing.T) {
 				edits = append(edits, &tscEdit{
 					caption: scenario.subScenario,
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`, scenario.mainErrorContent, false)
+						sys.writeFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`, scenario.mainErrorContent)
 					},
 				})
 			}
-			edits = append(edits,
+			edits = append(
+				edits,
 				&tscEdit{
 					caption: "No Change",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`, sys.readFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`), false)
+						sys.writeFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`, sys.readFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`))
 					},
 				},
 				&tscEdit{
 					caption: "Fix " + scenario.subScenario,
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError("/user/username/projects/noEmitOnError/src/main.ts", scenario.fixedErrorContent, false)
+						sys.writeFileNoError("/user/username/projects/noEmitOnError/src/main.ts", scenario.fixedErrorContent)
 					},
 				},
 				&tscEdit{
 					caption: "No Change",
 					edit: func(sys *TestSys) {
-						sys.writeFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`, sys.readFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`), false)
+						sys.writeFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`, sys.readFileNoError(`/user/username/projects/noEmitOnError/src/main.ts`))
 					},
 				},
 			)
@@ -3554,6 +4181,44 @@ func TestTscProjectReferences(t *testing.T) {
 			commandLineArgs: []string{"--p", "project"},
 		},
 		{
+			subScenario: "when project references have invalid fields",
+			files: FileMap{
+				"/home/src/workspaces/solution/project/index.ts": `export const x = 10;`,
+				"/home/src/workspaces/solution/project/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"noEmit": true
+					},
+					"files": ["index.ts"],
+					"references": [
+						{ "path": true },
+						{ "circular": true },
+						{ "path": "../utils", "circular": "yes" },
+						{ "path": "" },
+						{ "path": "../valid", "circular": true }
+					]
+				}`),
+				"/home/src/workspaces/solution/utils/index.ts":   "export const y = 10;",
+				"/home/src/workspaces/solution/utils/index.d.ts": "export declare const y = 10;",
+				"/home/src/workspaces/solution/utils/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"composite": true
+					}
+				}`),
+				"/home/src/workspaces/solution/valid/index.ts":   "export const z = 10;",
+				"/home/src/workspaces/solution/valid/index.d.ts": "export declare const z = 10;",
+				"/home/src/workspaces/solution/valid/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"composite": true
+					}
+				}`),
+			},
+			cwd:             "/home/src/workspaces/solution",
+			commandLineArgs: []string{"--p", "project"},
+		},
+		{
 			subScenario: "default import interop uses referenced project settings",
 			files: FileMap{
 				"/home/src/workspaces/project/node_modules/ambiguous-package/package.json": stringtestutil.Dedent(`
@@ -3601,6 +4266,41 @@ func TestTscProjectReferences(t *testing.T) {
 					import referencedSource from "../../lib/src/a"; // Error
 					import referencedDeclaration from "../../lib/dist/a"; // Error
 					import ambiguous from "ambiguous-package"; // Ok`),
+			},
+			commandLineArgs: []string{"--p", "app", "--pretty", "false"},
+		},
+		{
+			subScenario: "referenced project with esnext module disallows synthetic default imports",
+			files: FileMap{
+				"/home/src/workspaces/project/lib/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"composite": true,
+						"declaration": true,
+						"module": "esnext",
+						"moduleResolution": "bundler",
+						"rootDir": "src",
+						"outDir": "dist"
+					},
+					"include": ["src"]
+				}`),
+				"/home/src/workspaces/project/lib/src/utils.ts":    "export const test = () => 'test';",
+				"/home/src/workspaces/project/lib/dist/utils.d.ts": "export declare const test: () => string;",
+				"/home/src/workspaces/project/app/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"module": "esnext",
+						"moduleResolution": "bundler"
+					},
+					"references": [
+						{ "path": "../lib" }
+					]
+				}`),
+				"/home/src/workspaces/project/app/index.ts": stringtestutil.Dedent(`
+					import TestSrc from '../lib/src/utils'; // Error
+					import TestDecl from '../lib/dist/utils'; // Error
+					console.log(TestSrc.test());
+					console.log(TestDecl.test());`),
 			},
 			commandLineArgs: []string{"--p", "app", "--pretty", "false"},
 		},
@@ -4048,4 +4748,245 @@ func TestTypeAcquisition(t *testing.T) {
 		},
 		commandLineArgs: []string{},
 	}).run(t, "typeAcquisition")
+}
+
+func TestGenerateTrace(t *testing.T) {
+	t.Parallel()
+	cases := []*tscInput{
+		{
+			subScenario: "generateTrace generates types file",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"strict": true,
+						"noEmit": true
+					}
+				}`),
+				"/home/src/workspaces/project/a.ts": stringtestutil.Dedent(`
+				interface Person {
+					name: string;
+					age: number;
+				}
+				const p: Person = { name: "Alice", age: 30 };
+				`),
+			},
+			commandLineArgs: []string{"--generateTrace", "/home/src/workspaces/project/trace", "--singleThreaded"},
+		},
+		{
+			subScenario: "generateTrace with multiple files and complex types",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"compilerOptions": {
+						"strict": true,
+						"noEmit": true
+					}
+				}`),
+				"/home/src/workspaces/project/types.ts": stringtestutil.Dedent(`
+				export interface Container<T> {
+					value: T;
+					map<U>(fn: (x: T) => U): Container<U>;
+				}
+				export type Nullable<T> = T | null | undefined;
+				`),
+				"/home/src/workspaces/project/main.ts": stringtestutil.Dedent(`
+				import { Container, Nullable } from "./types";
+				const c: Container<number> = { value: 42, map: (fn) => ({ value: fn(42), map: c.map }) };
+				const n: Nullable<string> = "hello";
+				`),
+			},
+			commandLineArgs: []string{"--generateTrace", "/home/src/workspaces/project/trace", "--singleThreaded"},
+		},
+	}
+
+	for _, c := range cases {
+		c.run(t, "generateTrace")
+	}
+}
+
+func TestTscContentMapperEmit(t *testing.T) {
+	t.Parallel()
+	(&tscInput{
+		subScenario: "content-mapped files are not emitted",
+		files: FileMap{
+			"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+			{
+				"compilerOptions": {
+					"outDir": "./dist"
+				},
+				"contentMappers": [
+					{ "package": "vue-ts-mapper", "extensions": [".vue"] }
+				]
+			}`),
+			"/home/src/workspaces/project/index.ts": `export const local = 1;`,
+			"/home/src/workspaces/project/app.vue":  `export const app = 1;`,
+			"/home/src/workspaces/project/node_modules/vue-ts-mapper/package.json": stringtestutil.Dedent(`
+			{
+				"name": "vue-ts-mapper",
+				"version": "1.0.0",
+				"typescript": { "contentMapper": { "exec": ["verbatim-mapper"] } }
+			}`),
+		},
+		commandLineArgs: []string{"--runExternalCode"},
+	}).run(t, "contentMapperEmit")
+}
+
+func TestTscContentMapperExplainFiles(t *testing.T) {
+	t.Parallel()
+	(&tscInput{
+		subScenario: "supplemental virtual file include reason",
+		files: FileMap{
+			"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+			{
+				"contentMappers": [
+					{ "package": "mapper", "extensions": [".vue"] }
+				]
+			}`),
+			"/home/src/workspaces/project/app.vue": `export const value = 1;`,
+			"/home/src/workspaces/project/node_modules/mapper/package.json": stringtestutil.Dedent(`
+			{
+				"name": "mapper",
+				"version": "1.0.0",
+				"typescript": { "contentMapper": { "exec": ["supplemental-mapper"] } }
+			}`),
+		},
+		commandLineArgs: []string{"--runExternalCode", "--explainFiles"},
+	}).run(t, "contentMapperExplainFiles")
+}
+
+func TestTscContentMapperOptionDiagnostics(t *testing.T) {
+	t.Parallel()
+	(&tscInput{
+		subScenario: "nested mapper option diagnostic",
+		files: FileMap{
+			"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+			{
+				"contentMappers": [
+					{
+						"package": "mapper",
+						"extensions": [".vue"],
+						"options": { "plugins": [{ "name": 1 }] }
+					}
+				]
+			}`),
+			"/home/src/workspaces/project/app.vue":                          `export const value = 1;`,
+			"/home/src/workspaces/project/node_modules/mapper/package.json": contentmappertest.PackageJSON(contentmappertest.DynamicVerbatimMapper),
+		},
+		commandLineArgs: []string{"--runExternalCode", "--pretty", "false"},
+	}).run(t, "contentMapperOptionDiagnostics")
+}
+
+func TestTscContentMapperFailures(t *testing.T) {
+	t.Parallel()
+	failMapperPackageJSON := stringtestutil.Dedent(`
+	{
+		"name": "fail",
+		"version": "1.0.0",
+		"typescript": { "contentMapper": { "exec": ["failing-mapper"] } }
+	}`)
+	failMapperTSConfig := stringtestutil.Dedent(`
+	{
+		"contentMappers": [
+			{ "package": "fail", "extensions": [".vue"] }
+		]
+	}`)
+	testCases := []*tscInput{
+		{
+			subScenario: "initialization failure reports one project error",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+				{
+					"contentMappers": [
+						{ "package": "missing", "extensions": [".vue"] }
+					]
+				}`),
+				"/home/src/workspaces/project/index.ts": stringtestutil.Dedent(`
+					import "./a.vue";
+					import "./b.vue";
+					import "./c.vue";
+					import "./d.vue";
+					import "./e.vue";
+					import "./f.vue";`),
+				"/home/src/workspaces/project/a.vue": `<template>a</template>`,
+				"/home/src/workspaces/project/b.vue": `<template>b</template>`,
+				"/home/src/workspaces/project/c.vue": `<template>c</template>`,
+				"/home/src/workspaces/project/d.vue": `<template>d</template>`,
+				"/home/src/workspaces/project/e.vue": `<template>e</template>`,
+				"/home/src/workspaces/project/f.vue": `<template>f</template>`,
+				"/home/src/workspaces/project/node_modules/missing/package.json": stringtestutil.Dedent(`
+				{
+					"name": "missing",
+					"version": "1.0.0",
+					"typescript": { "contentMapper": { "exec": ["missing-mapper"] } }
+				}`),
+			},
+			commandLineArgs: []string{"--runExternalCode", "--singleThreaded"},
+		},
+		{
+			subScenario: "transform failure reports a per-file error",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json":                  failMapperTSConfig,
+				"/home/src/workspaces/project/index.ts":                       `import "./app.vue";`,
+				"/home/src/workspaces/project/app.vue":                        `<template>hi</template>`,
+				"/home/src/workspaces/project/node_modules/fail/package.json": failMapperPackageJSON,
+			},
+			commandLineArgs: []string{"--runExternalCode"},
+		},
+		{
+			subScenario: "mapper is disabled after repeated failures",
+			files: FileMap{
+				"/home/src/workspaces/project/tsconfig.json": failMapperTSConfig,
+				"/home/src/workspaces/project/index.ts": stringtestutil.Dedent(`
+					import "./a.vue";
+					import "./b.vue";
+					import "./c.vue";
+					import "./d.vue";
+					import "./e.vue";
+					import "./f.vue";
+					import "./g.vue";`),
+				"/home/src/workspaces/project/a.vue":                          `<template>a</template>`,
+				"/home/src/workspaces/project/b.vue":                          `<template>b</template>`,
+				"/home/src/workspaces/project/c.vue":                          `<template>c</template>`,
+				"/home/src/workspaces/project/d.vue":                          `<template>d</template>`,
+				"/home/src/workspaces/project/e.vue":                          `<template>e</template>`,
+				"/home/src/workspaces/project/f.vue":                          `<template>f</template>`,
+				"/home/src/workspaces/project/g.vue":                          `<template>g</template>`,
+				"/home/src/workspaces/project/node_modules/fail/package.json": failMapperPackageJSON,
+			},
+			// --singleThreaded makes file loading order deterministic so the same files exceed the failure
+			// threshold on every run.
+			commandLineArgs: []string{"--runExternalCode", "--singleThreaded"},
+		},
+	}
+	for _, test := range testCases {
+		test.run(t, "contentMapperFailures")
+	}
+}
+
+func TestTscContentMapperSynthesized(t *testing.T) {
+	t.Parallel()
+	(&tscInput{
+		subScenario: "diagnostics in synthesized code render on the virtual text",
+		files: FileMap{
+			"/home/src/workspaces/project/tsconfig.json": stringtestutil.Dedent(`
+			{
+				"contentMappers": [
+					{ "package": "synth", "extensions": [".vue"] }
+				]
+			}`),
+			"/home/src/workspaces/project/index.ts": `import "./app.vue";`,
+			"/home/src/workspaces/project/app.vue": stringtestutil.Dedent(`
+				<template>
+					<Widget />
+				</template>`),
+			"/home/src/workspaces/project/node_modules/synth/package.json": stringtestutil.Dedent(`
+			{
+				"name": "synth",
+				"version": "1.0.0",
+				"typescript": { "contentMapper": { "exec": ["synthesizing-mapper"] } }
+			}`),
+		},
+		commandLineArgs: []string{"--runExternalCode"},
+	}).run(t, "contentMapperSynthesized")
 }

@@ -5,29 +5,10 @@ import (
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
 
-type JSDocParsingMode uint8
-
-const (
-	JSDocParsingModeParseAll JSDocParsingMode = iota
-	JSDocParsingModeParseNone
-	JSDocParsingModeParseForTypeErrors
-	JSDocParsingModeParseForTypeInfo
-)
-
 type SourceFileParseOptions struct {
 	FileName                       string
 	Path                           tspath.Path
-	CompilerOptions                core.SourceFileAffectingCompilerOptions
 	ExternalModuleIndicatorOptions ExternalModuleIndicatorOptions
-	JSDocParsingMode               JSDocParsingMode
-}
-
-func GetSourceFileAffectingCompilerOptions(fileName string, options *core.CompilerOptions) core.SourceFileAffectingCompilerOptions {
-	// Declaration files are not parsed/bound differently depending on compiler options.
-	if tspath.IsDeclarationFileName(fileName) {
-		return core.SourceFileAffectingCompilerOptions{}
-	}
-	return options.SourceFileAffecting()
 }
 
 type ExternalModuleIndicatorOptions struct {
@@ -156,7 +137,7 @@ func walkTreeForJSXTags(node *Node) *Node {
 		if node.SubtreeFacts()&SubtreeContainsJsx == 0 {
 			return false
 		}
-		if IsJsxOpeningElement(node) || IsJsxFragment(node) {
+		if IsJsxOpeningLikeElement(node) || IsJsxFragment(node) {
 			found = node
 			return true
 		}

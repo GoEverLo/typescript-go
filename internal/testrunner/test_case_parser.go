@@ -44,18 +44,19 @@ var optionRegex = regexp.MustCompile(`(?m)^\/{2}\s*@(\w+)\s*:\s*([^\r\n]*)`)
 var linkRegex = regexp.MustCompile(`(?m)^\/{2}\s*@link\s*:\s*([^\r\n]*)\s*->\s*([^\r\n]*)`)
 
 // File-specific directives used by fourslash tests
-var fourslashDirectives = []string{"emitthisfile"}
+var fourslashDirectives = []string{"emitthisfile", "noopen"}
 
 // Given a test file containing // @FileName directives,
 // return an array of named units of code to be added to an existing compiler instance.
 func makeUnitsFromTest(code string, fileName string) testCaseContent {
-	testUnits, symlinks, currentDirectory, _, _ := ParseTestFilesAndSymlinks(
+	testUnits, symlinks, currentDirectory, globalOptions, _ := ParseTestFilesAndSymlinks(
 		code,
 		fileName,
 		func(filename string, content string, fileOptions map[string]string) (*testUnit, error) {
 			return &testUnit{content: content, name: filename}, nil
 		},
 	)
+
 	if currentDirectory == "" {
 		currentDirectory = srcFolder
 	}
@@ -65,7 +66,15 @@ func makeUnitsFromTest(code string, fileName string) testCaseContent {
 	for _, data := range testUnits {
 		allFiles[tspath.GetNormalizedAbsolutePath(data.name, currentDirectory)] = data.content
 	}
-	parseConfigHost := tsoptionstest.NewVFSParseConfigHost(allFiles, currentDirectory, true /*useCaseSensitiveFileNames*/)
+	parseConfigHost := tsoptionstest.NewVFSParseConfigHostWithSymlinks(allFiles, symlinks, currentDirectory, true /*useCaseSensitiveFileNames*/)
+
+	// Content mappers are gated behind --runExternalCode, a command-line-only option. A test
+	// opts in with a top-level `// @runExternalCode: true`, which we surface to the config
+	// parse as an existing option so the gate passes and the mappers register.
+	var existingOptions *core.CompilerOptions
+	if globalOptions["runexternalcode"] == "true" {
+		existingOptions = &core.CompilerOptions{RunExternalCode: core.TSTrue}
+	}
 
 	// check if project has tsconfig.json in the list of files
 	var tsConfig *tsoptions.ParsedCommandLine
@@ -86,11 +95,12 @@ func makeUnitsFromTest(code string, fileName string) testCaseContent {
 				tsConfigSourceFile,
 				parseConfigHost,
 				configDir,
-				nil, /*existingOptions*/
+				existingOptions,
+				nil, /*existingOptionsRaw*/
 				configFileName,
 				nil, /*resolutionStack*/
-				nil, /*extraFileExtensions*/
-				nil /*extendedConfigCache*/)
+				nil, /*extendedConfigCache*/
+			)
 			tsConfigFileUnitData = data
 
 			// delete tsconfig file entry from the list
@@ -139,6 +149,8 @@ func ParseTestFilesAndSymlinksWithOptions[T any](
 	// Stuff related to the subfile we're parsing
 	var currentFileContent strings.Builder
 	var currentFileName string
+	seenContentLine := false
+	hasSeenFile := false
 	if options.AllowImplicitFirstFile {
 		// For fourslash tests, initialize currentFileName to the fileName parameter
 		// so content before the first @Filename directive goes into an implicit first file
@@ -163,7 +175,14 @@ func ParseTestFilesAndSymlinksWithOptions[T any](
 				currentDirectory = metaDataValue
 			}
 			if metaDataName != "filename" {
-				if slices.Contains(fourslashDirectives, metaDataName) {
+				if metaDataName == "symlink" && currentFileName != "" {
+					for link := range strings.SplitSeq(metaDataValue, ",") {
+						link = strings.TrimSpace(link)
+						if link != "" {
+							symlinks[link] = currentFileName
+						}
+					}
+				} else if slices.Contains(fourslashDirectives, metaDataName) {
 					// File-specific option
 					currentFileOptions[metaDataName] = metaDataValue
 				} else {
@@ -180,8 +199,9 @@ func ParseTestFilesAndSymlinksWithOptions[T any](
 			// New metadata statement after having collected some code to go with the previous metadata
 			if currentFileName != "" {
 				// Store result file - always save for regular tests, but skip empty implicit first file for fourslash
-				shouldSaveFile := currentFileContent.Len() != 0 || !options.AllowImplicitFirstFile
+				shouldSaveFile := !options.AllowImplicitFirstFile || currentFileContent.Len() != 0 || hasSeenFile
 				if shouldSaveFile {
+					hasSeenFile = true
 					newTestFile, e := parseFile(currentFileName, currentFileContent.String(), currentFileOptions)
 					if e != nil {
 						parseError = e
@@ -192,6 +212,7 @@ func ParseTestFilesAndSymlinksWithOptions[T any](
 
 				// Reset local data
 				currentFileContent.Reset()
+				seenContentLine = false
 				currentFileName = metaDataValue
 				currentFileOptions = make(map[string]string)
 			} else {
@@ -205,6 +226,7 @@ func ParseTestFilesAndSymlinksWithOptions[T any](
 				// we need to save it as an implicit first file before starting the new file
 				if hasContentBeforeFirstFilename && options.AllowImplicitFirstFile && currentFileName != "" {
 					// Store the implicit first file
+					hasSeenFile = true
 					newTestFile, e := parseFile(currentFileName, currentFileContent.String(), currentFileOptions)
 					if e != nil {
 						parseError = e
@@ -215,15 +237,25 @@ func ParseTestFilesAndSymlinksWithOptions[T any](
 
 				// Reset for the new file
 				currentFileContent.Reset()
+				seenContentLine = false
 				currentFileName = strings.TrimSpace(testMetaData[2])
 				currentFileOptions = make(map[string]string)
 			}
 		} else {
 			// Subfile content line
 			// Append to the current subfile content, inserting a newline if needed
-			if currentFileContent.Len() != 0 {
-				// End-of-line
-				currentFileContent.WriteRune('\n')
+			// For fourslash tests, use seenContentLine to preserve leading blank lines
+			// (matching TS fourslash's //// content markers). For compiler tests, use
+			// Len() != 0 which drops leading blanks (matching TS's harness behavior).
+			if options.AllowImplicitFirstFile {
+				if seenContentLine {
+					currentFileContent.WriteRune('\n')
+				}
+				seenContentLine = true
+			} else {
+				if currentFileContent.Len() != 0 {
+					currentFileContent.WriteRune('\n')
+				}
 			}
 			currentFileContent.WriteString(line)
 		}

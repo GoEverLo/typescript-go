@@ -16,10 +16,6 @@ exports.K = class K {
 
 //// [mod1.js]
 "use strict";
-export var K = class K {
-    values() {
-    }
-};
 exports.K = class K {
     values() {
     }
@@ -34,10 +30,8 @@ function f(k) {
 
 
 //// [mod1.d.ts]
-export declare var K: {
-    new (): {
-        values(): void;
-    };
-};
+export declare class K {
+    values(): void;
+}
 //// [main.d.ts]
 export {};

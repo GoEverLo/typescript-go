@@ -27,7 +27,7 @@ Output::
 
 [[90mHH:MM:SS AM[0m] Found 0 errors. Watching for file changes.
 
-//// [/home/src/tslibs/TS/Lib/lib.d.ts] *Lib*
+//// [/home/src/tslibs/TS/Lib/lib.es2025.full.d.ts] *Lib*
 /// <reference no-default-lib="true"/>
 interface Boolean {}
 interface Function {}
@@ -72,9 +72,12 @@ declare const console: { log(msg: any): void; };
   "size": 54
 }
 
+Watch Registrations::
+Directory watches::
+  /user/username/projects/myproject (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /user/username/projects/myproject/a.js
 *refresh*    /user/username/projects/myproject/b.ts
 Signatures::
@@ -99,9 +102,12 @@ Output::
 //// [/user/username/projects/myproject/tsconfig.tsbuildinfo] *rewrite with same content*
 //// [/user/username/projects/myproject/tsconfig.tsbuildinfo.readable.baseline.txt] *rewrite with same content*
 
+Watch Registrations::
+Directory watches::
+  /user/username/projects/myproject (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /user/username/projects/myproject/a.js
 *refresh*    /user/username/projects/myproject/b.ts
 Signatures::
@@ -127,9 +133,12 @@ Output::
 //// [/user/username/projects/myproject/tsconfig.tsbuildinfo] *rewrite with same content*
 //// [/user/username/projects/myproject/tsconfig.tsbuildinfo.readable.baseline.txt] *rewrite with same content*
 
+Watch Registrations::
+Directory watches::
+  /user/username/projects/myproject (recursive)
 tsconfig.json::
 SemanticDiagnostics::
-*refresh*    /home/src/tslibs/TS/Lib/lib.d.ts
+*refresh*    /home/src/tslibs/TS/Lib/lib.es2025.full.d.ts
 *refresh*    /user/username/projects/myproject/a.js
 *refresh*    /user/username/projects/myproject/b.ts
 Signatures::

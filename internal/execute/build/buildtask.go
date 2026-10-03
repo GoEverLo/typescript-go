@@ -2,7 +2,9 @@ package build
 
 import (
 	"fmt"
+	"iter"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,20 +13,13 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/contentmapper"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/diagnostics"
 	"github.com/microsoft/typescript-go/internal/execute/incremental"
 	"github.com/microsoft/typescript-go/internal/execute/tsc"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
-)
-
-type updateKind uint
-
-const (
-	updateKindNone updateKind = iota
-	updateKindConfig
-	updateKindUpdate
 )
 
 type buildKind uint
@@ -70,19 +65,39 @@ type BuildTask struct {
 	prevReporter *BuildTask
 	reportDone   chan struct{}
 
-	// Watching things
-	configTime          time.Time
-	extendedConfigTimes []time.Time
-	inputFiles          []time.Time
-
 	buildInfoEntry   *buildInfoEntry
 	buildInfoEntryMu sync.Mutex
+	packageJsons     []string
 
 	errors             []*ast.Diagnostic
 	pending            atomic.Bool
 	isInitialCycle     bool
 	downStreamUpdateMu sync.Mutex
 	dirty              bool
+
+	contentMapperProjectOnce sync.Once
+	contentMapperProject     contentmapper.Project
+	contentMapperProjectErr  error
+}
+
+func (t *BuildTask) getContentMapperProject(orchestrator *Orchestrator) (contentmapper.Project, error) {
+	t.contentMapperProjectOnce.Do(func() {
+		if orchestrator.contentMapperHost == nil || t.resolved == nil || len(t.resolved.ContentMappers()) == 0 {
+			return
+		}
+		t.contentMapperProject = orchestrator.contentMapperHost.Project(contentmapper.ProjectSpec{
+			ConfigFileName:  t.resolved.ConfigName(),
+			Mappers:         t.resolved.ContentMappers(),
+			CompilerOptions: t.resolved.CompilerOptions(),
+		})
+	})
+	return t.contentMapperProject, t.contentMapperProjectErr
+}
+
+func (t *BuildTask) refreshContentMapperProject(orchestrator *Orchestrator) {
+	if t.contentMapperProject != nil {
+		t.contentMapperProjectErr = t.contentMapperProject.Refresh()
+	}
 }
 
 func (t *BuildTask) waitOnUpstream() {
@@ -170,6 +185,15 @@ func (t *BuildTask) updateDownstream(orchestrator *Orchestrator, path tspath.Pat
 	if orchestrator.opts.Command.BuildOptions.StopBuildOnErrors.IsTrue() && t.status.isError() {
 		return
 	}
+	if t.result.program == nil {
+		for _, downStream := range t.downStream {
+			downStream.downStreamUpdateMu.Lock()
+			downStream.resetStatus()
+			downStream.pending.Store(true)
+			downStream.downStreamUpdateMu.Unlock()
+		}
+		return
+	}
 
 	for _, downStream := range t.downStream {
 		downStream.downStreamUpdateMu.Lock()
@@ -211,22 +235,30 @@ func (t *BuildTask) compileAndEmit(orchestrator *Orchestrator, path tspath.Path)
 	compileTimes.ConfigTime = configTime
 	buildInfoReadStart := orchestrator.opts.Sys.Now()
 	var oldProgram *incremental.Program
+	contentMapperProject, err := t.getContentMapperProject(orchestrator)
+	if err != nil {
+		t.reportDiagnostic(compiler.ContentMapperProjectDiagnostic(err))
+		t.status = &upToDateStatus{kind: upToDateStatusTypeBuildErrors}
+		t.result.exitStatus = tsc.ExitStatusDiagnosticsPresent_OutputsSkipped
+		return
+	}
+	compilerHost := &compilerHost{
+		host:                 orchestrator.host,
+		trace:                tsc.GetTraceWithWriterFromSys(&t.result.builder, orchestrator.opts.Command.Locale(), orchestrator.opts.Testing),
+		contentMapperProject: contentMapperProject,
+	}
 	if !orchestrator.opts.Command.BuildOptions.Force.IsTrue() {
-		oldProgram = incremental.ReadBuildInfoProgram(t.resolved, orchestrator.host, orchestrator.host)
+		oldProgram = incremental.ReadBuildInfoProgram(t.resolved, orchestrator.host, compilerHost)
 	}
 	compileTimes.BuildInfoReadTime = orchestrator.opts.Sys.Now().Sub(buildInfoReadStart)
 	parseStart := orchestrator.opts.Sys.Now()
 	program := compiler.NewProgram(compiler.ProgramOptions{
 		Config: t.resolved,
-		Host: &compilerHost{
-			host:  orchestrator.host,
-			trace: tsc.GetTraceWithWriterFromSys(&t.result.builder, orchestrator.opts.Command.Locale(), orchestrator.opts.Testing),
-		},
-		JSDocParsingMode: ast.JSDocParsingModeParseForTypeErrors,
+		Host:   compilerHost,
 	})
 	compileTimes.ParseTime = orchestrator.opts.Sys.Now().Sub(parseStart)
 	changesComputeStart := orchestrator.opts.Sys.Now()
-	t.result.program = incremental.NewProgram(program, oldProgram, orchestrator.host, orchestrator.opts.Testing != nil)
+	t.result.program = incremental.NewProgram(program, oldProgram, orchestrator.host, orchestrator.opts.Sys.Now, orchestrator.opts.Testing != nil)
 	compileTimes.ChangesComputeTime = orchestrator.opts.Sys.Now().Sub(changesComputeStart)
 
 	result, statistics := tsc.EmitAndReportStatistics(tsc.EmitInput{
@@ -237,8 +269,8 @@ func (t *BuildTask) compileAndEmit(orchestrator *Orchestrator, path tspath.Path)
 		ReportDiagnostic:   t.reportDiagnostic,
 		ReportErrorSummary: tsc.QuietDiagnosticsReporter,
 		Writer:             &t.result.builder,
-		WriteFile: func(fileName, text string, writeByteOrderMark bool, data *compiler.WriteFileData) error {
-			return t.writeFile(orchestrator, fileName, text, writeByteOrderMark, data)
+		WriteFile: func(fileName, text string, data *compiler.WriteFileData) error {
+			return t.writeFile(orchestrator, fileName, text, data)
 		},
 		CompileTimes:       &compileTimes,
 		Testing:            orchestrator.opts.Testing,
@@ -246,6 +278,7 @@ func (t *BuildTask) compileAndEmit(orchestrator *Orchestrator, path tspath.Path)
 	})
 	t.result.exitStatus = result.Status
 	t.result.statistics = statistics
+	t.packageJsons = t.result.program.PackageJsonLookupPaths()
 	if (!program.Options().NoEmitOnError.IsTrue() || len(result.Diagnostics) == 0) &&
 		(len(result.EmitResult.EmittedFiles) > 0 || t.status.kind != upToDateStatusTypeOutOfDateBuildInfoWithErrors) {
 		// Update time stamps for rest of the outputs
@@ -342,6 +375,9 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 
 	// Check the build info
 	buildInfoPath := t.resolved.GetBuildInfoFileName()
+	getBuildInfoDirectory := core.Memoize(func() string {
+		return tspath.GetDirectoryPath(tspath.GetNormalizedAbsolutePath(buildInfoPath, orchestrator.comparePathsOptions.CurrentDirectory))
+	})
 	buildInfo, buildInfoTime := t.loadOrStoreBuildInfo(orchestrator, configPath, buildInfoPath)
 	if buildInfo == nil {
 		return &upToDateStatus{kind: upToDateStatusTypeOutputMissing, data: buildInfoPath}
@@ -350,6 +386,16 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 	// build info version
 	if !buildInfo.IsValidVersion() {
 		return &upToDateStatus{kind: upToDateStatusTypeTsVersionOutputOfDate, data: buildInfo.Version}
+	}
+
+	// If a configured content mapper's identity has changed, files it produced may be stale.
+	contentMapperProject, err := t.getContentMapperProject(orchestrator)
+	contentMapperIdentities, identityErr := incremental.ContentMapperIdentities(contentMapperProject)
+	if identityErr != nil {
+		t.contentMapperProjectErr = identityErr
+	}
+	if err != nil || identityErr != nil || !buildInfo.ContentMapperIdentitiesMatch(contentMapperIdentities) {
+		return &upToDateStatus{kind: upToDateStatusTypeOutOfDateOptions, data: buildInfoPath}
 	}
 
 	// Report errors if build info indicates errors
@@ -378,7 +424,7 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 		}
 
 		// Some of the emit files like source map or dts etc are not yet done
-		if buildInfo.IsEmitPending(t.resolved, tspath.GetDirectoryPath(tspath.GetNormalizedAbsolutePath(buildInfoPath, orchestrator.comparePathsOptions.CurrentDirectory))) {
+		if buildInfo.IsEmitPending(t.resolved, getBuildInfoDirectory()) {
 			return &upToDateStatus{kind: upToDateStatusTypeOutOfDateOptions, data: buildInfoPath}
 		}
 	}
@@ -386,7 +432,9 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 	oldestOutputFileAndTime := fileAndTime{buildInfoPath, buildInfoTime}
 	var newestInputFileAndTime fileAndTime
 	var seenRoots collections.Set[tspath.Path]
-	var buildInfoRootInfoReader *incremental.BuildInfoRootInfoReader
+	getBuildInfoRootInfoReader := core.Memoize(func() *incremental.BuildInfoRootInfoReader {
+		return buildInfo.GetBuildInfoRootInfoReader(getBuildInfoDirectory(), orchestrator.comparePathsOptions)
+	})
 	for _, inputFile := range t.resolved.FileNames() {
 		inputTime := orchestrator.host.GetMTime(inputFile)
 		if inputTime.IsZero() {
@@ -397,10 +445,7 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 			var version string
 			var currentVersion string
 			if buildInfo.IsIncremental() {
-				if buildInfoRootInfoReader == nil {
-					buildInfoRootInfoReader = buildInfo.GetBuildInfoRootInfoReader(tspath.GetDirectoryPath(tspath.GetNormalizedAbsolutePath(buildInfoPath, orchestrator.comparePathsOptions.CurrentDirectory)), orchestrator.comparePathsOptions)
-				}
-				buildInfoFileInfo, resolvedInputPath := buildInfoRootInfoReader.GetBuildInfoFileInfo(inputPath)
+				buildInfoFileInfo, resolvedInputPath := getBuildInfoRootInfoReader().GetBuildInfoFileInfo(inputPath)
 				if fileInfo := buildInfoFileInfo.GetFileInfo(); fileInfo != nil && fileInfo.Version() != "" {
 					version = fileInfo.Version()
 					if text, ok := orchestrator.host.FS().ReadFile(string(resolvedInputPath)); ok {
@@ -422,13 +467,55 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 		seenRoots.Add(inputPath)
 	}
 
-	if buildInfoRootInfoReader == nil {
-		buildInfoRootInfoReader = buildInfo.GetBuildInfoRootInfoReader(tspath.GetDirectoryPath(tspath.GetNormalizedAbsolutePath(buildInfoPath, orchestrator.comparePathsOptions.CurrentDirectory)), orchestrator.comparePathsOptions)
-	}
-	for root := range buildInfoRootInfoReader.Roots() {
+	for root := range getBuildInfoRootInfoReader().Roots() {
 		if !seenRoots.Has(root) {
 			// File was root file when project was built but its not any more
 			return &upToDateStatus{kind: upToDateStatusTypeOutOfDateRoots, data: &inputOutputName{string(root), buildInfoPath}}
+		}
+	}
+
+	if buildInfo.IsIncremental() {
+		var resolvedRoots collections.Set[tspath.Path]
+		for root := range getBuildInfoRootInfoReader().Roots() {
+			if _, resolved := getBuildInfoRootInfoReader().GetBuildInfoFileInfo(root); resolved != "" {
+				resolvedRoots.Add(resolved)
+			}
+		}
+		for index, buildInfoFileInfo := range buildInfo.FileInfos {
+			buildInfoFileName := buildInfo.FileNames[index]
+			// Lib files bundled with the compiler can change only with the version of the compiler,
+			// which is already verified with buildInfo.Version
+			if incremental.IsBuildInfoFileNameDefaultLibrary(buildInfoFileName) {
+				continue
+			}
+			inputFile := tspath.GetNormalizedAbsolutePath(buildInfoFileName, getBuildInfoDirectory())
+			inputPath := orchestrator.toPath(inputFile)
+			// Root files are already checked
+			if seenRoots.Has(inputPath) || resolvedRoots.Has(inputPath) {
+				continue
+			}
+			if isContentMapperSupplementalBuildInfoPath(inputPath, getBuildInfoRootInfoReader().Roots()) {
+				continue
+			}
+			inputTime := orchestrator.host.GetMTime(inputFile)
+			if inputTime.IsZero() {
+				// Input file that was part of the program is missing (eg: dependency was removed)
+				return &upToDateStatus{kind: upToDateStatusTypeInputFileMissing, data: inputFile}
+			}
+
+			if inputTime.After(oldestOutputFileAndTime.time) {
+				var currentVersion string
+				version := buildInfoFileInfo.GetFileInfo().Version()
+				if version != "" {
+					if text, ok := orchestrator.host.FS().ReadFile(inputFile); ok {
+						currentVersion = incremental.ComputeHash(text, orchestrator.opts.Testing != nil)
+					}
+				}
+				if version == "" || version != currentVersion {
+					return &upToDateStatus{kind: upToDateStatusTypeInputFileNewer, data: &inputOutputName{inputFile, buildInfoPath}}
+				}
+				inputTextUnchanged = true
+			}
 		}
 	}
 
@@ -508,14 +595,22 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 		}
 	}
 
-	// !!! sheetal TODO : watch??
-	// // Check package file time
-	// const packageJsonLookups = state.lastCachedPackageJsonLookups.get(resolvedPath);
-	// const dependentPackageFileStatus = packageJsonLookups && forEachKey(
-	//     packageJsonLookups,
-	//     path => checkConfigFileUpToDateStatus(state, path, oldestOutputFileTime, oldestOutputFileName),
-	// );
-	// if (dependentPackageFileStatus) return dependentPackageFileStatus;
+	for packageJson := range buildInfo.GetPackageJsons(getBuildInfoDirectory()) {
+		packageJsonTime := orchestrator.host.GetMTime(packageJson)
+		if packageJsonTime.IsZero() {
+			return &upToDateStatus{kind: upToDateStatusTypeInputFileMissing, data: packageJson}
+		}
+		if packageJsonTime.After(oldestOutputFileAndTime.time) {
+			return &upToDateStatus{kind: upToDateStatusTypeInputFileNewer, data: &inputOutputName{packageJson, oldestOutputFileAndTime.file}}
+		}
+	}
+	for packageJson := range buildInfo.GetMissingPackageJsons(getBuildInfoDirectory()) {
+		if !orchestrator.host.GetMTime(packageJson).IsZero() {
+			return &upToDateStatus{kind: upToDateStatusTypeInputFileNewer, data: &inputOutputName{packageJson, oldestOutputFileAndTime.file}}
+		}
+	}
+	t.packageJsons = slices.Collect(buildInfo.GetPackageJsons(getBuildInfoDirectory()))
+	t.packageJsons = append(t.packageJsons, slices.Collect(buildInfo.GetMissingPackageJsons(getBuildInfoDirectory()))...)
 
 	return &upToDateStatus{
 		kind: core.IfElse(
@@ -525,6 +620,23 @@ func (t *BuildTask) getUpToDateStatus(orchestrator *Orchestrator, configPath tsp
 		),
 		data: &inputOutputFileAndTime{newestInputFileAndTime, oldestOutputFileAndTime, buildInfoPath},
 	}
+}
+
+func isContentMapperSupplementalBuildInfoPath(inputPath tspath.Path, roots iter.Seq[tspath.Path]) bool {
+	for root := range roots {
+		suffix, ok := strings.CutPrefix(string(inputPath), string(root)+".")
+		if !ok {
+			continue
+		}
+		index, extension, ok := strings.Cut(suffix, ".")
+		if !ok || extension == "" {
+			continue
+		}
+		if _, err := strconv.Atoi(index); err == nil && contentmapper.IsSupportedVirtualExtension("."+extension) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *BuildTask) reportUpToDateStatus(orchestrator *Orchestrator) {
@@ -711,14 +823,7 @@ func (t *BuildTask) cleanProjectOutput(orchestrator *Orchestrator, outputFile st
 }
 
 func (t *BuildTask) updateWatch(orchestrator *Orchestrator, oldCache *collections.SyncMap[tspath.Path, time.Time]) {
-	t.configTime = orchestrator.host.loadOrStoreMTime(t.config, oldCache, false)
 	if t.resolved != nil {
-		t.extendedConfigTimes = core.Map(t.resolved.ExtendedSourceFiles(), func(p string) time.Time {
-			return orchestrator.host.loadOrStoreMTime(p, oldCache, false)
-		})
-		t.inputFiles = core.Map(t.resolved.FileNames(), func(p string) time.Time {
-			return orchestrator.host.loadOrStoreMTime(p, oldCache, false)
-		})
 		if t.canUpdateJsDtsOutputTimestamps() {
 			for outputFile := range t.resolved.GetOutputFileNames() {
 				orchestrator.host.storeMTimeFromOldCache(outputFile, oldCache)
@@ -736,45 +841,6 @@ func (t *BuildTask) resetStatus() {
 func (t *BuildTask) resetConfig(orchestrator *Orchestrator, path tspath.Path) {
 	t.dirty = true
 	orchestrator.host.resolvedReferences.delete(path)
-}
-
-func (t *BuildTask) hasUpdate(orchestrator *Orchestrator, path tspath.Path) updateKind {
-	var needsConfigUpdate bool
-	var needsUpdate bool
-	if configTime := orchestrator.host.GetMTime(t.config); configTime != t.configTime {
-		t.resetConfig(orchestrator, path)
-		needsConfigUpdate = true
-	}
-	if t.resolved != nil {
-		for index, file := range t.resolved.ExtendedSourceFiles() {
-			if orchestrator.host.GetMTime(file) != t.extendedConfigTimes[index] {
-				t.resetConfig(orchestrator, path)
-				needsConfigUpdate = true
-			}
-		}
-		for index, file := range t.resolved.FileNames() {
-			if orchestrator.host.GetMTime(file) != t.inputFiles[index] {
-				t.resetStatus()
-				needsUpdate = true
-			}
-		}
-		if !needsConfigUpdate {
-			configStart := orchestrator.opts.Sys.Now()
-			newConfig := t.resolved.ReloadFileNamesOfParsedCommandLine(orchestrator.host.FS())
-			configTime := orchestrator.opts.Sys.Now().Sub(configStart)
-			// Make new channels if needed later
-			t.reportDone = make(chan struct{})
-			t.done = make(chan struct{})
-			if !slices.Equal(t.resolved.FileNames(), newConfig.FileNames()) {
-				orchestrator.host.resolvedReferences.store(path, newConfig)
-				orchestrator.host.configTimes.Store(path, configTime)
-				t.resolved = newConfig
-				t.resetStatus()
-				needsUpdate = true
-			}
-		}
-	}
-	return core.IfElse(needsConfigUpdate, updateKindConfig, core.IfElse(needsUpdate, updateKindUpdate, updateKindNone))
 }
 
 func (t *BuildTask) loadOrStoreBuildInfo(orchestrator *Orchestrator, configPath tspath.Path, buildInfoFileName string) (*incremental.BuildInfo, time.Time) {
@@ -841,8 +907,8 @@ func (t *BuildTask) storeOutputTimeStamp(orchestrator *Orchestrator) bool {
 	return orchestrator.opts.Command.CompilerOptions.Watch.IsTrue() && !t.resolved.CompilerOptions().IsIncremental()
 }
 
-func (t *BuildTask) writeFile(orchestrator *Orchestrator, fileName string, text string, writeByteOrderMark bool, data *compiler.WriteFileData) error {
-	err := orchestrator.host.FS().WriteFile(fileName, text, writeByteOrderMark)
+func (t *BuildTask) writeFile(orchestrator *Orchestrator, fileName string, text string, data *compiler.WriteFileData) error {
+	err := orchestrator.host.FS().WriteFile(fileName, text)
 	if err == nil {
 		if data != nil && data.BuildInfo != nil {
 			t.onBuildInfoEmit(orchestrator, fileName, data.BuildInfo.(*incremental.BuildInfo), t.result.program.HasChangedDtsFile())

@@ -27,15 +27,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files := filesForReferencedProjectProgram(false)
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsproto.DocumentUri("file:///user/username/projects/myproject/main/main.ts")
 		session.DidOpenFile(context.Background(), uri, 1, files["/user/username/projects/myproject/main/main.ts"].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -58,15 +56,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 			export declare function fn5(): void;
 		`
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsproto.DocumentUri("file:///user/username/projects/myproject/main/main.ts")
 		session.DidOpenFile(context.Background(), uri, 1, files["/user/username/projects/myproject/main/main.ts"].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -82,15 +78,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferences(false, "")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -106,15 +100,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferences(true, "")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -130,15 +122,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferences(false, "@issue/")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -154,15 +144,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferences(true, "@issue/")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -178,15 +166,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferencesInSubfolder(false, "")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -202,15 +188,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferencesInSubfolder(true, "")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -226,15 +210,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferencesInSubfolder(false, "@issue/")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -250,15 +232,13 @@ func TestProjectReferencesProgram(t *testing.T) {
 		t.Parallel()
 		files, aTest, bFoo, bBar := filesForSymlinkReferencesInSubfolder(true, "@issue/")
 		session, _ := projecttestutil.Setup(files)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 0)
 
 		uri := lsconv.FileNameToDocumentURI(aTest)
 		session.DidOpenFile(context.Background(), uri, 1, files[aTest].(string), lsproto.LanguageKindTypeScript)
 
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		projects := snapshot.ProjectCollection.Projects()
 		p := projects[0]
@@ -270,18 +250,53 @@ func TestProjectReferencesProgram(t *testing.T) {
 		assert.Assert(t, barFile != nil)
 	})
 
+	t.Run("references through symlink with directory index subpath (issue 4373)", func(t *testing.T) {
+		t.Parallel()
+		files, aIndex, bFile := filesForDirectorySubpathSymlinkReferences("")
+		session, _ := projecttestutil.Setup(files)
+		uri := lsconv.FileNameToDocumentURI(aIndex)
+		session.DidOpenFile(context.Background(), uri, 1, files[aIndex].(string), lsproto.LanguageKindTypeScript)
+
+		snapshot := session.Snapshot()
+		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
+		p := snapshot.ProjectCollection.Projects()[0]
+		assert.Equal(t, p.Kind, project.KindConfigured)
+
+		// The import must redirect to source, so the source file is part of the program...
+		assert.Assert(t, p.Program.GetSourceFile(bFile) != nil)
+		// ...and there must be no `TS2307: Cannot find module 'b/lib/File'` diagnostic.
+		diagnostics := p.Program.GetSemanticDiagnostics(projecttestutil.WithRequestID(t.Context()), p.Program.GetSourceFile(aIndex))
+		assert.Equal(t, len(diagnostics), 0)
+	})
+
+	t.Run("references through symlink with directory index subpath scoped package", func(t *testing.T) {
+		t.Parallel()
+		files, aIndex, bFile := filesForDirectorySubpathSymlinkReferences("@issue/")
+		session, _ := projecttestutil.Setup(files)
+		uri := lsconv.FileNameToDocumentURI(aIndex)
+		session.DidOpenFile(context.Background(), uri, 1, files[aIndex].(string), lsproto.LanguageKindTypeScript)
+
+		snapshot := session.Snapshot()
+		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
+		p := snapshot.ProjectCollection.Projects()[0]
+		assert.Equal(t, p.Kind, project.KindConfigured)
+
+		assert.Assert(t, p.Program.GetSourceFile(bFile) != nil)
+		diagnostics := p.Program.GetSemanticDiagnostics(projecttestutil.WithRequestID(t.Context()), p.Program.GetSourceFile(aIndex))
+		assert.Equal(t, len(diagnostics), 0)
+	})
+
 	t.Run("when new file is added to referenced project", func(t *testing.T) {
 		t.Parallel()
 		files := filesForReferencedProjectProgram(false)
 		session, utils := projecttestutil.Setup(files)
 		uri := lsproto.DocumentUri("file:///user/username/projects/myproject/main/main.ts")
 		session.DidOpenFile(context.Background(), uri, 1, files["/user/username/projects/myproject/main/main.ts"].(string), lsproto.LanguageKindTypeScript)
-		snapshot, release := session.Snapshot()
-		defer release()
+		snapshot := session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		programBefore := snapshot.ProjectCollection.Projects()[0].Program
 
-		err := utils.FS().WriteFile("/user/username/projects/myproject/dependency/fns2.ts", `export const x = 2;`, false)
+		err := utils.FS().WriteFile("/user/username/projects/myproject/dependency/fns2.ts", `export const x = 2;`)
 		assert.NilError(t, err)
 		session.DidChangeWatchedFiles(context.Background(), []*lsproto.FileEvent{
 			{
@@ -292,10 +307,109 @@ func TestProjectReferencesProgram(t *testing.T) {
 
 		_, err = session.GetLanguageService(context.Background(), uri)
 		assert.NilError(t, err)
-		snapshot, release = session.Snapshot()
-		defer release()
+		snapshot = session.Snapshot()
 		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
 		assert.Check(t, snapshot.ProjectCollection.Projects()[0].Program != programBefore)
+	})
+
+	t.Run("dropped project reference does not crash on later change to the dropped config", func(t *testing.T) {
+		t.Parallel()
+		// Regression test for https://github.com/microsoft/typescript-go/issues/3942.
+		// A project reference dropped from a tsconfig used to leave a stale entry in
+		// the referenced config's retainingProjects. When the referencing project was
+		// later deleted and the referenced config subsequently changed, the stale entry
+		// named a project that no longer existed, crashing markProjectsAffectedByConfigChanges.
+		files := map[string]any{
+			"/user/username/projects/myproject/main/tsconfig.json": `{
+				"compilerOptions": {
+					"composite": true
+				},
+				"references": [{ "path": "../dependency" }]
+			}`,
+			"/user/username/projects/myproject/main/main.ts": `
+				import { fn1 } from '../dependency/fns'
+				fn1();
+			`,
+			"/user/username/projects/myproject/dependency/tsconfig.json": `{
+				"compilerOptions": {
+					"composite": true
+				}
+			}`,
+			"/user/username/projects/myproject/dependency/fns.ts": `
+				export function fn1() { }
+			`,
+			"/user/username/projects/myproject/other/tsconfig.json": `{
+				"compilerOptions": {
+					"composite": true
+				}
+			}`,
+			"/user/username/projects/myproject/other/other.ts": `export const y = 1;`,
+		}
+
+		session, utils := projecttestutil.Setup(files)
+
+		mainURI := lsproto.DocumentUri("file:///user/username/projects/myproject/main/main.ts")
+		mainContent := files["/user/username/projects/myproject/main/main.ts"].(string)
+		otherURI := lsproto.DocumentUri("file:///user/username/projects/myproject/other/other.ts")
+		otherContent := files["/user/username/projects/myproject/other/other.ts"].(string)
+
+		// 1. Open main.ts. The main project's program resolves the `../dependency`
+		//    project reference, so the dependency config's retainingProjects gains
+		//    the main project path.
+		session.DidOpenFile(context.Background(), mainURI, 1, mainContent, lsproto.LanguageKindTypeScript)
+		session.WaitForBackgroundTasks()
+		snapshot := session.Snapshot()
+		assert.Equal(t, len(snapshot.ProjectCollection.Projects()), 1)
+		assert.Assert(t, snapshot.ConfigFileRegistry.GetConfig(tspath.Path("/user/username/projects/myproject/dependency/tsconfig.json")) != nil)
+
+		// 2. Remove the project reference from main/tsconfig.json and rebuild.
+		//    The new program no longer references dependency.
+		err := utils.FS().WriteFile("/user/username/projects/myproject/main/tsconfig.json", `{
+			"compilerOptions": {
+				"composite": true
+			}
+		}`)
+		assert.NilError(t, err)
+		session.DidChangeWatchedFiles(context.Background(), []*lsproto.FileEvent{
+			{
+				Type: lsproto.FileChangeTypeChanged,
+				Uri:  "file:///user/username/projects/myproject/main/tsconfig.json",
+			},
+		})
+		_, err = session.GetLanguageService(context.Background(), mainURI)
+		assert.NilError(t, err)
+
+		// 3. Close main.ts and open an unrelated file. Opening triggers cleanup of
+		//    orphaned configured projects, deleting the main project.
+		session.DidCloseFile(context.Background(), mainURI)
+		session.DidOpenFile(context.Background(), otherURI, 1, otherContent, lsproto.LanguageKindTypeScript)
+		session.WaitForBackgroundTasks()
+		snapshot = session.Snapshot()
+		assert.Assert(t, snapshot.ProjectCollection.ConfiguredProject(tspath.Path("/user/username/projects/myproject/main/tsconfig.json")) == nil)
+		// Dropping the reference releases main from dependency's retainingProjects,
+		// so the now-unreferenced dependency config is cleaned up and no stale entry
+		// survives to crash a later config change.
+		assert.Assert(t, snapshot.ConfigFileRegistry.GetConfig(tspath.Path("/user/username/projects/myproject/dependency/tsconfig.json")) == nil)
+
+		// 4. Change dependency/tsconfig.json and flush. This used to copy the stale
+		//    retainingProjects into affectedProjects and crash
+		//    markProjectsAffectedByConfigChanges loading the deleted main project.
+		err = utils.FS().WriteFile("/user/username/projects/myproject/dependency/tsconfig.json", `{
+			"compilerOptions": {
+				"composite": true,
+				"strict": true
+			}
+		}`)
+		assert.NilError(t, err)
+		session.DidChangeWatchedFiles(context.Background(), []*lsproto.FileEvent{
+			{
+				Type: lsproto.FileChangeTypeChanged,
+				Uri:  "file:///user/username/projects/myproject/dependency/tsconfig.json",
+			},
+		})
+		_, err = session.GetLanguageService(context.Background(), otherURI)
+		assert.NilError(t, err)
+		session.WaitForBackgroundTasks()
 	})
 }
 
@@ -380,6 +494,26 @@ func filesForSymlinkReferencesInSubfolder(preserveSymlinks bool, scope string) (
 	addConfigForPackage(files, "A", preserveSymlinks, []string{"../B"})
 	addConfigForPackage(files, "B", preserveSymlinks, nil)
 	return files, aTest, bFoo, bBar
+}
+
+func filesForDirectorySubpathSymlinkReferences(scope string) (files map[string]any, aIndex string, bFile string) {
+	aIndex = "/user/username/projects/myproject/packages/a/src/index.ts"
+	bFile = "/user/username/projects/myproject/packages/b/src/File/index.ts"
+	files = map[string]any{
+		"/user/username/projects/myproject/packages/b/package.json": `{
+			"main": "lib/index.js",
+			"types": "lib/index.d.ts"
+		}`,
+		aIndex: fmt.Sprintf(`
+			import { helper } from "%sb/lib/File";
+			export const result: number = helper();
+		`, scope),
+		bFile: `export function helper(): number { return 1; }`,
+		fmt.Sprintf("/user/username/projects/myproject/node_modules/%sb", scope): vfstest.Symlink("/user/username/projects/myproject/packages/b"),
+	}
+	addConfigForPackage(files, "a", false, []string{"../b"})
+	addConfigForPackage(files, "b", false, nil)
+	return files, aIndex, bFile
 }
 
 func addConfigForPackage(files map[string]any, packageName string, preserveSymlinks bool, references []string) {

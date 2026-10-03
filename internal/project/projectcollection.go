@@ -2,10 +2,13 @@ package project
 
 import (
 	"cmp"
+	"maps"
 	"slices"
+	"sync"
 
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/ls"
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
 
@@ -21,12 +24,49 @@ type ProjectCollection struct {
 	// configuredProjects is the set of loaded projects associated with a tsconfig
 	// file, keyed by the config file path.
 	configuredProjects map[tspath.Path]*Project
+	// openFiles is the set of open file paths associated with the snapshot that owns
+	// this project collection.
+	openFiles collections.Set[tspath.Path]
 	// inferredProject is a fallback project that is used when no configured
 	// project can be found for an open file.
 	inferredProject *Project
-	// apiOpenedProjects is the set of projects that should be kept open for
-	// API clients.
-	apiOpenedProjects map[tspath.Path]struct{}
+	// apiState tracks the projects and files that API clients have explicitly
+	// opened so they are kept loaded across snapshots.
+	apiState APIState
+
+	openConfiguredProjectsOnce sync.Once
+	openConfiguredProjects     *collections.Set[tspath.Path]
+}
+
+// APIState tracks the projects and files that API clients have explicitly opened.
+// Opens and closes are ref-counted so multiple API clients don't clobber each
+// other, and it is carried across snapshots so API-opened resources stay loaded.
+type APIState struct {
+	// openProjects is the ref-counted set of projects to keep open for API
+	// clients, keyed by config file path. The value is the number of outstanding
+	// API opens.
+	openProjects map[tspath.Path]int
+	// openFiles is the ref-counted set of files to keep open for API clients,
+	// keyed by file path. Files with no configured project are loaded into the
+	// inferred project.
+	openFiles map[tspath.Path]apiOpenedFile
+}
+
+func (s APIState) clone() APIState {
+	return APIState{
+		openProjects: maps.Clone(s.openProjects),
+		openFiles:    maps.Clone(s.openFiles),
+	}
+}
+
+func (s APIState) equals(other APIState) bool {
+	return maps.Equal(s.openProjects, other.openProjects) && maps.Equal(s.openFiles, other.openFiles)
+}
+
+// apiOpenedFile tracks a file kept open by API clients along with its ref count.
+type apiOpenedFile struct {
+	fileName string
+	refCount int
 }
 
 func (c *ProjectCollection) ConfigFileRegistry() *ConfigFileRegistry { return c.configFileRegistry }
@@ -93,8 +133,8 @@ func (c *ProjectCollection) InferredProject() *Project {
 	return c.inferredProject
 }
 
-func (c *ProjectCollection) GetProjectsContainingFile(path tspath.Path) []*Project {
-	var projects []*Project
+func (c *ProjectCollection) GetProjectsContainingFile(path tspath.Path) []ls.Project {
+	var projects []ls.Project
 	for _, project := range c.ConfiguredProjects() {
 		if project.containsFile(path) {
 			projects = append(projects, project)
@@ -106,8 +146,39 @@ func (c *ProjectCollection) GetProjectsContainingFile(path tspath.Path) []*Proje
 	return projects
 }
 
+// GetOpenConfiguredProjects returns configured projects containing at least one open file.
+func (c *ProjectCollection) GetOpenConfiguredProjects() *collections.Set[tspath.Path] {
+	c.openConfiguredProjectsOnce.Do(func() {
+		openProjects := collections.NewSetWithSizeHint[tspath.Path](len(c.configuredProjects))
+		for path := range c.openFiles.Keys() {
+			if projectPath, ok := c.fileDefaultProjects[path]; ok && projectPath != inferredProjectName {
+				if _, ok := c.configuredProjects[projectPath]; ok {
+					openProjects.Add(projectPath)
+					continue
+				}
+			}
+
+			for _, project := range c.configuredProjects {
+				if project.containsFile(path) {
+					openProjects.Add(project.configFilePath)
+				}
+			}
+		}
+		c.openConfiguredProjects = openProjects
+	})
+	return c.openConfiguredProjects
+}
+
+func openFilePaths(overlays map[tspath.Path]*Overlay) collections.Set[tspath.Path] {
+	openFiles := collections.Set[tspath.Path]{M: make(map[tspath.Path]struct{}, len(overlays))}
+	for path := range overlays {
+		openFiles.Add(path)
+	}
+	return openFiles
+}
+
 // !!! result could be cached
-func (c *ProjectCollection) GetDefaultProject(fileName string, path tspath.Path) *Project {
+func (c *ProjectCollection) GetDefaultProject(path tspath.Path) *Project {
 	if result, ok := c.fileDefaultProjects[path]; ok {
 		if result == inferredProjectName {
 			return c.inferredProject
@@ -154,20 +225,20 @@ func (c *ProjectCollection) GetDefaultProject(fileName string, path tspath.Path)
 		return firstConfiguredProject
 	}
 	// Multiple projects include the file directly.
-	if defaultProject := c.findDefaultConfiguredProject(fileName, path); defaultProject != nil {
+	if defaultProject := c.findDefaultConfiguredProject(path); defaultProject != nil {
 		return defaultProject
 	}
 	return firstConfiguredProject
 }
 
-func (c *ProjectCollection) findDefaultConfiguredProject(fileName string, path tspath.Path) *Project {
+func (c *ProjectCollection) findDefaultConfiguredProject(path tspath.Path) *Project {
 	if configFileName := c.configFileRegistry.GetConfigFileName(path); configFileName != "" {
-		return c.findDefaultConfiguredProjectWorker(fileName, path, configFileName, nil, nil)
+		return c.findDefaultConfiguredProjectWorker(path, configFileName, nil, nil)
 	}
 	return nil
 }
 
-func (c *ProjectCollection) findDefaultConfiguredProjectWorker(fileName string, path tspath.Path, configFileName string, visited *collections.SyncSet[*Project], fallback *Project) *Project {
+func (c *ProjectCollection) findDefaultConfiguredProjectWorker(path tspath.Path, configFileName string, visited *collections.SyncSet[*Project], fallback *Project) *Project {
 	configFilePath := c.toPath(configFileName)
 	project, ok := c.configuredProjects[configFilePath]
 	if !ok {
@@ -184,7 +255,8 @@ func (c *ProjectCollection) findDefaultConfiguredProjectWorker(fileName string, 
 			if project.CommandLine == nil {
 				return nil
 			}
-			return core.Map(project.CommandLine.ResolvedProjectReferencePaths(), func(configFileName string) *Project {
+			// A referenced project may not be loaded if `disableReferencedProjectLoad` is true.
+			return core.MapNonNil(project.CommandLine.ResolvedProjectReferencePaths(), func(configFileName string) *Project {
 				return c.configuredProjects[c.toPath(configFileName)]
 			})
 		},
@@ -217,7 +289,7 @@ func (c *ProjectCollection) findDefaultConfiguredProjectWorker(fileName string, 
 		return fallback
 	}
 	if ancestorConfigName := c.configFileRegistry.GetAncestorConfigFileName(path, configFileName); ancestorConfigName != "" {
-		return c.findDefaultConfiguredProjectWorker(fileName, path, ancestorConfigName, visited, fallback)
+		return c.findDefaultConfiguredProjectWorker(path, ancestorConfigName, visited, fallback)
 	}
 	return fallback
 }
@@ -226,9 +298,12 @@ func (c *ProjectCollection) findDefaultConfiguredProjectWorker(fileName string, 
 func (c *ProjectCollection) clone() *ProjectCollection {
 	return &ProjectCollection{
 		toPath:              c.toPath,
+		configFileRegistry:  c.configFileRegistry,
 		configuredProjects:  c.configuredProjects,
+		openFiles:           c.openFiles,
 		inferredProject:     c.inferredProject,
 		fileDefaultProjects: c.fileDefaultProjects,
+		apiState:            c.apiState,
 	}
 }
 

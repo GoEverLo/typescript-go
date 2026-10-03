@@ -31,7 +31,8 @@ class Foo {
         <div  /*2*/ />
     }
 }`
-	f := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
 	f.VerifyCompletions(t, []string{"1", "2"}, &fourslash.CompletionsExpectedList{
 		IsIncomplete: false,
 		ItemDefaults: &fourslash.CompletionsExpectedItemDefaults{
@@ -41,8 +42,8 @@ class Foo {
 			Exact: []fourslash.CompletionsExpectedItem{
 				&lsproto.CompletionItem{
 					Label:  "aria-label",
-					Kind:   PtrTo(lsproto.CompletionItemKindField),
-					Detail: PtrTo("(property) \"aria-label\": string"),
+					Kind:   new(lsproto.CompletionItemKindField),
+					Detail: new("(property) \"aria-label\": string"),
 					Documentation: &lsproto.StringOrMarkupContent{
 						MarkupContent: &lsproto.MarkupContent{
 							Kind:  lsproto.MarkupKindMarkdown,
@@ -52,12 +53,68 @@ class Foo {
 				},
 				&lsproto.CompletionItem{
 					Label:  "foo",
-					Kind:   PtrTo(lsproto.CompletionItemKindField),
-					Detail: PtrTo("(property) foo: string"),
+					Kind:   new(lsproto.CompletionItemKindField),
+					Detail: new("(property) foo: string"),
 					Documentation: &lsproto.StringOrMarkupContent{
 						MarkupContent: &lsproto.MarkupContent{
 							Kind:  lsproto.MarkupKindMarkdown,
 							Value: "Doc",
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestCompletionsInJsxNamespacedIntrinsicTag(t *testing.T) {
+	t.Parallel()
+	defer testutil.RecoverAndFail(t, "Panic on fourslash test")
+	const content = `// @jsx: react
+// @Filename: /a.tsx
+declare const React: any;
+declare namespace JSX {
+    interface Element {}
+    interface IntrinsicElements {
+        /** Element docs */
+        "foo:bar": {
+            /** Foo docs */
+            foo: boolean
+            /** Bar docs */
+            bar: string
+        }
+    }
+}
+<foo:bar /*1*/ />
+<foo:bar  /*2*/></foo:bar>`
+	f, done := fourslash.NewFourslash(t, nil /*capabilities*/, content)
+	defer done()
+	f.VerifyCompletions(t, []string{"1", "2"}, &fourslash.CompletionsExpectedList{
+		IsIncomplete: false,
+		ItemDefaults: &fourslash.CompletionsExpectedItemDefaults{
+			CommitCharacters: &DefaultCommitCharacters,
+		},
+		Items: &fourslash.CompletionsExpectedItems{
+			Exact: []fourslash.CompletionsExpectedItem{
+				&lsproto.CompletionItem{
+					Label:  "bar",
+					Kind:   new(lsproto.CompletionItemKindField),
+					Detail: new("(property) bar: string"),
+					Documentation: &lsproto.StringOrMarkupContent{
+						MarkupContent: &lsproto.MarkupContent{
+							Kind:  lsproto.MarkupKindMarkdown,
+							Value: "Bar docs",
+						},
+					},
+				},
+				&lsproto.CompletionItem{
+					Label:  "foo",
+					Kind:   new(lsproto.CompletionItemKindField),
+					Detail: new("(property) foo: boolean"),
+					Documentation: &lsproto.StringOrMarkupContent{
+						MarkupContent: &lsproto.MarkupContent{
+							Kind:  lsproto.MarkupKindMarkdown,
+							Value: "Foo docs",
 						},
 					},
 				},

@@ -1,6 +1,7 @@
 package tsctests
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"maps"
@@ -16,7 +17,9 @@ import (
 	"github.com/microsoft/typescript-go/internal/execute"
 	"github.com/microsoft/typescript-go/internal/execute/incremental"
 	"github.com/microsoft/typescript-go/internal/execute/tsc"
+	"github.com/microsoft/typescript-go/internal/execute/watchmanager"
 	"github.com/microsoft/typescript-go/internal/locale"
+	"github.com/microsoft/typescript-go/internal/testutil/contentmappertest"
 	"github.com/microsoft/typescript-go/internal/testutil/fsbaselineutil"
 	"github.com/microsoft/typescript-go/internal/testutil/harnessutil"
 	"github.com/microsoft/typescript-go/internal/testutil/stringtestutil"
@@ -102,7 +105,7 @@ func GetFileMapWithBuild(files FileMap, commandLineArgs []string) FileMap {
 	sys := newTestSys(&tscInput{
 		files: maps.Clone(files),
 	}, false)
-	execute.CommandLine(sys, commandLineArgs, sys)
+	execute.CommandLine(context.Background(), sys, commandLineArgs, sys)
 	sys.fs.writtenFiles.Range(func(key string) bool {
 		if text, ok := sys.fsFromFileMap().ReadFile(key); ok {
 			files[key] = text
@@ -131,6 +134,9 @@ func newTestSys(tscInput *tscInput, forIncrementalCorrectness bool) *TestSys {
 	}, currentWrite)
 	sys.env = tscInput.env
 	sys.forIncrementalCorrectness = forIncrementalCorrectness
+	sys.mockWatchBackend = NewMockWatchBackend()
+	sys.mockWatchBackend.DirectoryExists = sys.fs.FS.DirectoryExists
+	sys.mockWatchBackend.UseCaseSensitiveFileNames = !tscInput.ignoreCase
 	sys.fsDiffer = &fsbaselineutil.FSDiffer{
 		FS:           sys.fs.FS.(iovfs.FsWithSys),
 		DefaultLibs:  func() *collections.SyncSet[string] { return sys.fs.defaultLibs },
@@ -155,6 +161,7 @@ type TestSys struct {
 	tracer                    *harnessutil.TracerForBaselining
 	fsDiffer                  *fsbaselineutil.FSDiffer
 	forIncrementalCorrectness bool
+	mockWatchBackend          *MockWatchBackend
 
 	fs                 *testFs
 	defaultLibraryPath string
@@ -195,7 +202,7 @@ func (s *TestSys) ensureLibPathExists(path string) {
 			s.fs.defaultLibs = &collections.SyncSet[string]{}
 		}
 		s.fs.defaultLibs.Add(path)
-		err := s.fsFromFileMap().WriteFile(path, tscDefaultLibContent, false)
+		err := s.fsFromFileMap().WriteFile(path, tscDefaultLibContent)
 		if err != nil {
 			panic("Failed to write default library file: " + err.Error())
 		}
@@ -214,6 +221,10 @@ func (s *TestSys) Writer() io.Writer {
 	return s.currentWrite
 }
 
+func (s *TestSys) ErrorWriter() io.Writer {
+	return s.currentWrite
+}
+
 func (s *TestSys) WriteOutputIsTTY() bool {
 	return true
 }
@@ -227,6 +238,13 @@ func (s *TestSys) GetWidthOfTerminal() int {
 
 func (s *TestSys) GetEnvironmentVariable(name string) string {
 	return s.env[name]
+}
+
+// Spawn serves the fake content mappers in-process, selecting the implementation by the exec command the
+// mapper package declares (see internal/testutil/contentmappertest), so tests exercise the full IPC stack
+// without spawning a subprocess.
+func (s *TestSys) Spawn(command []string, dir string, stderr io.Writer) (io.ReadWriteCloser, error) {
+	return contentmappertest.NewSpawner().Spawn(command, dir, stderr)
 }
 
 func (s *TestSys) OnEmittedFiles(result *compiler.EmitResult, mTimesCache *collections.SyncMap[tspath.Path, time.Time]) {
@@ -308,8 +326,13 @@ func (s *TestSys) writeHeaderToBaseline(builder *strings.Builder, program *incre
 		builder.WriteString(tspath.GetRelativePathFromDirectory(s.cwd, configFilePath, tspath.ComparePathsOptions{
 			UseCaseSensitiveFileNames: s.FS().UseCaseSensitiveFileNames(),
 			CurrentDirectory:          s.GetCurrentDirectory(),
-		}) + "::\n")
+		}))
+		builder.WriteString("::\n")
 	}
+}
+
+func (s *TestSys) WatchBackend() watchmanager.WatchBackend {
+	return s.mockWatchBackend
 }
 
 func (s *TestSys) OnProgram(program *incremental.Program) {
@@ -320,10 +343,14 @@ func (s *TestSys) OnProgram(program *incremental.Program) {
 	for _, file := range program.GetProgram().GetSourceFiles() {
 		if diagnostics, ok := testingData.SemanticDiagnosticsPerFile.Load(file.Path()); ok {
 			if oldDiagnostics, ok := testingData.OldProgramSemanticDiagnosticsPerFile.Load(file.Path()); !ok || oldDiagnostics != diagnostics {
-				s.programBaselines.WriteString("*refresh*    " + file.FileName() + "\n")
+				s.programBaselines.WriteString("*refresh*    ")
+				s.programBaselines.WriteString(file.FileName())
+				s.programBaselines.WriteString("\n")
 			}
 		} else {
-			s.programBaselines.WriteString("*not cached* " + file.FileName() + "\n")
+			s.programBaselines.WriteString("*not cached* ")
+			s.programBaselines.WriteString(file.FileName())
+			s.programBaselines.WriteString("\n")
 		}
 	}
 
@@ -333,11 +360,17 @@ func (s *TestSys) OnProgram(program *incremental.Program) {
 		if kind, ok := testingData.UpdatedSignatureKinds[file.Path()]; ok {
 			switch kind {
 			case incremental.SignatureUpdateKindComputedDts:
-				s.programBaselines.WriteString("(computed .d.ts) " + file.FileName() + "\n")
+				s.programBaselines.WriteString("(computed .d.ts) ")
+				s.programBaselines.WriteString(file.FileName())
+				s.programBaselines.WriteString("\n")
 			case incremental.SignatureUpdateKindStoredAtEmit:
-				s.programBaselines.WriteString("(stored at emit) " + file.FileName() + "\n")
+				s.programBaselines.WriteString("(stored at emit) ")
+				s.programBaselines.WriteString(file.FileName())
+				s.programBaselines.WriteString("\n")
 			case incremental.SignatureUpdateKindUsedVersion:
-				s.programBaselines.WriteString("(used version)   " + file.FileName() + "\n")
+				s.programBaselines.WriteString("(used version)   ")
+				s.programBaselines.WriteString(file.FileName())
+				s.programBaselines.WriteString("\n")
 			}
 		}
 	}
@@ -359,11 +392,15 @@ func (s *TestSys) OnProgram(program *incremental.Program) {
 		s.writeHeaderToBaseline(&s.programIncludeBaselines, program)
 		s.programIncludeBaselines.WriteString("!!! Expected all files to have include reasons\nfilesWithoutIncludeReason::\n")
 		for _, file := range filesWithoutIncludeReason {
-			s.programIncludeBaselines.WriteString("  " + file + "\n")
+			s.programIncludeBaselines.WriteString("  ")
+			s.programIncludeBaselines.WriteString(file)
+			s.programIncludeBaselines.WriteString("\n")
 		}
 		s.programIncludeBaselines.WriteString("filesNotInProgramWithIncludeReason::\n")
 		for _, file := range fileNotInProgramWithIncludeReason {
-			s.programIncludeBaselines.WriteString("  " + file + "\n")
+			s.programIncludeBaselines.WriteString("  ")
+			s.programIncludeBaselines.WriteString(file)
+			s.programIncludeBaselines.WriteString("\n")
 		}
 	}
 }
@@ -435,6 +472,7 @@ func (o *outputSanitizer) addOutputLine(s string) {
 	s = strings.ReplaceAll(s, fmt.Sprintf("'%s'", core.Version()), fmt.Sprintf("'%s'", harnessutil.FakeTSVersion))
 	s = strings.ReplaceAll(s, englishVersion, fakeEnglishVersion)
 	s = strings.ReplaceAll(s, czechVersion, fakeCzechVersion)
+	s = fsbaselineutil.SanitizeInternalSymbolName(s)
 	o.outputLines = append(o.outputLines, s)
 }
 
@@ -519,8 +557,8 @@ func (s *TestSys) baselineFSwithDiff(baseline io.Writer) {
 	s.fsDiffer.BaselineFSwithDiff(baseline)
 }
 
-func (s *TestSys) writeFileNoError(path string, content string, writeByteOrderMark bool) {
-	if err := s.fsFromFileMap().WriteFile(path, content, writeByteOrderMark); err != nil {
+func (s *TestSys) writeFileNoError(path string, content string) {
+	if err := s.fsFromFileMap().WriteFile(path, content); err != nil {
 		panic(err)
 	}
 }
@@ -540,28 +578,28 @@ func (s *TestSys) readFileNoError(path string) string {
 }
 
 func (s *TestSys) renameFileNoError(oldPath string, newPath string) {
-	s.writeFileNoError(newPath, s.readFileNoError(oldPath), false)
+	s.writeFileNoError(newPath, s.readFileNoError(oldPath))
 	s.removeNoError(oldPath)
 }
 
 func (s *TestSys) replaceFileText(path string, oldText string, newText string) {
 	content := s.readFileNoError(path)
 	content = strings.Replace(content, oldText, newText, 1)
-	s.writeFileNoError(path, content, false)
+	s.writeFileNoError(path, content)
 }
 
 func (s *TestSys) replaceFileTextAll(path string, oldText string, newText string) {
 	content := s.readFileNoError(path)
 	content = strings.ReplaceAll(content, oldText, newText)
-	s.writeFileNoError(path, content, false)
+	s.writeFileNoError(path, content)
 }
 
 func (s *TestSys) appendFile(path string, text string) {
 	content := s.readFileNoError(path)
-	s.writeFileNoError(path, content+text, false)
+	s.writeFileNoError(path, content+text)
 }
 
 func (s *TestSys) prependFile(path string, text string) {
 	content := s.readFileNoError(path)
-	s.writeFileNoError(path, text+content, false)
+	s.writeFileNoError(path, text+content)
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/compiler"
+	"github.com/microsoft/typescript-go/internal/contentmapper"
 	"github.com/microsoft/typescript-go/internal/diagnostics"
 	"github.com/microsoft/typescript-go/internal/execute/incremental"
 	"github.com/microsoft/typescript-go/internal/execute/tsc"
@@ -47,24 +48,40 @@ func (h *host) GetCurrentDirectory() string {
 }
 
 func (h *host) Trace(msg *diagnostics.Message, args ...any) {
-	panic("build.Orchestrator.host does not support tracing, use a different host for tracing")
+	panic("build.Orchestrator.host does not support tracing; use a different host for tracing")
 }
 
 func (h *host) GetSourceFile(opts ast.SourceFileParseOptions) *ast.SourceFile {
-	// Cache dts and json files as they will be reused
-	return h.sourceFiles.loadOrStoreNewIf(opts, h.host.GetSourceFile, func(value *ast.SourceFile) bool {
-		return value != nil && (tspath.IsDeclarationFileName(opts.FileName) || tspath.FileExtensionIs(opts.FileName, tspath.ExtensionJson))
-	})
+	if tspath.IsDeclarationFileName(opts.FileName) || tspath.FileExtensionIs(opts.FileName, tspath.ExtensionJson) {
+		// Cache dts and json files as they will be reused
+		return h.sourceFiles.loadOrStore(opts, h.host.GetSourceFile, false /* allowZero */)
+	}
+	return h.host.GetSourceFile(opts)
+}
+
+func (h *host) GetContentMappedSourceFiles(parseOptions ast.SourceFileParseOptions, mapper *contentmapper.Mapper) (contentmapper.SourceFiles, error) {
+	return contentmapper.SourceFiles{}, contentmapper.ErrProjectUnavailable
+}
+
+func (h *host) ContentMapperProject() contentmapper.Project {
+	panic("build.Orchestrator.host does not support content mapper project; use an individual project's compiler host instead")
 }
 
 func (h *host) GetResolvedProjectReference(fileName string, path tspath.Path) *tsoptions.ParsedCommandLine {
-	return h.resolvedReferences.loadOrStoreNew(path, func(path tspath.Path) *tsoptions.ParsedCommandLine {
+	return h.resolvedReferences.loadOrStore(path, func(path tspath.Path) *tsoptions.ParsedCommandLine {
 		configStart := h.orchestrator.opts.Sys.Now()
-		commandLine, _ := tsoptions.GetParsedCommandLineOfConfigFilePath(fileName, path, h.orchestrator.opts.Command.CompilerOptions, h, &h.extendedConfigCache)
+		// Wrap command line options in "compilerOptions" key to match tsconfig.json structure
+		var commandLineRaw *collections.OrderedMap[string, any]
+		if raw, ok := h.orchestrator.opts.Command.Raw.(*collections.OrderedMap[string, any]); ok {
+			wrapped := &collections.OrderedMap[string, any]{}
+			wrapped.Set("compilerOptions", raw)
+			commandLineRaw = wrapped
+		}
+		commandLine, _ := tsoptions.GetParsedCommandLineOfConfigFilePath(fileName, path, h.orchestrator.opts.Command.CompilerOptions, commandLineRaw, h, &h.extendedConfigCache)
 		configTime := h.orchestrator.opts.Sys.Now().Sub(configStart)
 		h.configTimes.Store(path, configTime)
 		return commandLine
-	})
+	}, true /* allowZero */)
 }
 
 func (h *host) ReadBuildInfo(config *tsoptions.ParsedCommandLine) *incremental.BuildInfo {

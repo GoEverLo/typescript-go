@@ -6,9 +6,10 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/module"
-	"github.com/microsoft/typescript-go/internal/modulespecifiers"
 	"github.com/microsoft/typescript-go/internal/outputpaths"
+	"github.com/microsoft/typescript-go/internal/packagejson"
 	"github.com/microsoft/typescript-go/internal/printer"
+	"github.com/microsoft/typescript-go/internal/symlinks"
 	"github.com/microsoft/typescript-go/internal/transformers/declarations"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
@@ -70,7 +71,7 @@ func (host *emitHost) GetNearestAncestorDirectoryWithPackageJson(dirname string)
 	return host.program.GetNearestAncestorDirectoryWithPackageJson(dirname)
 }
 
-func (host *emitHost) GetPackageJsonInfo(pkgJsonPath string) modulespecifiers.PackageJsonInfo {
+func (host *emitHost) GetPackageJsonInfo(pkgJsonPath string) *packagejson.InfoCacheEntry {
 	return host.program.GetPackageJsonInfo(pkgJsonPath)
 }
 
@@ -92,7 +93,11 @@ func (host *emitHost) GetEffectiveDeclarationFlags(node *ast.Node, flags ast.Mod
 
 func (host *emitHost) GetOutputPathsFor(file *ast.SourceFile, forceDtsPaths bool) declarations.OutputPaths {
 	// TODO: cache
-	return outputpaths.GetOutputPathsFor(file, host.Options(), host, forceDtsPaths)
+	return outputpaths.GetOutputPathsFor(file, host.Options(), host, outputpaths.ForceEmitPaths{Dts: forceDtsPaths})
+}
+
+func (host *emitHost) SourceFileMayBeEmitted(file *ast.SourceFile, forceDtsEmit bool) bool {
+	return sourceFileMayBeEmitted(file, host, forceDtsEmit, false)
 }
 
 func (host *emitHost) GetResolutionModeOverride(node *ast.Node) core.ResolutionMode {
@@ -107,6 +112,11 @@ func (host *emitHost) Options() *core.CompilerOptions { return host.program.Opti
 func (host *emitHost) SourceFiles() []*ast.SourceFile { return host.program.SourceFiles() }
 func (host *emitHost) GetCurrentDirectory() string    { return host.program.GetCurrentDirectory() }
 func (host *emitHost) CommonSourceDirectory() string  { return host.program.CommonSourceDirectory() }
+
+func (host *emitHost) ContentMapperExtensions() []string {
+	return host.program.ContentMapperExtensions()
+}
+
 func (host *emitHost) UseCaseSensitiveFileNames() bool {
 	return host.program.UseCaseSensitiveFileNames()
 }
@@ -115,8 +125,8 @@ func (host *emitHost) IsEmitBlocked(file string) bool {
 	return host.program.IsEmitBlocked(file)
 }
 
-func (host *emitHost) WriteFile(fileName string, text string, writeByteOrderMark bool) error {
-	return host.program.Host().FS().WriteFile(fileName, text, writeByteOrderMark)
+func (host *emitHost) WriteFile(fileName string, text string) error {
+	return host.program.Host().FS().WriteFile(fileName, text)
 }
 
 func (host *emitHost) GetEmitResolver() printer.EmitResolver {
@@ -125,4 +135,13 @@ func (host *emitHost) GetEmitResolver() printer.EmitResolver {
 
 func (host *emitHost) IsSourceFileFromExternalLibrary(file *ast.SourceFile) bool {
 	return host.program.IsSourceFileFromExternalLibrary(file)
+}
+
+func (host *emitHost) GetSymlinkCache() *symlinks.KnownSymlinks {
+	return host.program.GetSymlinkCache()
+}
+
+func (host *emitHost) ResolveModuleName(moduleName string, containingFile string, resolutionMode core.ResolutionMode) *module.ResolvedModule {
+	resolved, _ := host.program.resolver.ResolveModuleName(moduleName, containingFile, resolutionMode, nil)
+	return resolved
 }

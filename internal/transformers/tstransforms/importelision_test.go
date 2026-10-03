@@ -8,8 +8,9 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/module"
-	"github.com/microsoft/typescript-go/internal/modulespecifiers"
+	"github.com/microsoft/typescript-go/internal/packagejson"
 	"github.com/microsoft/typescript-go/internal/printer"
+	"github.com/microsoft/typescript-go/internal/symlinks"
 	"github.com/microsoft/typescript-go/internal/testutil/emittestutil"
 	"github.com/microsoft/typescript-go/internal/testutil/parsetestutil"
 	"github.com/microsoft/typescript-go/internal/transformers"
@@ -49,6 +50,10 @@ func (p *fakeProgram) CommonSourceDirectory() string {
 	panic("unimplemented")
 }
 
+func (p *fakeProgram) ContentMapperExtensions() []string {
+	return nil
+}
+
 func (p *fakeProgram) GetResolvedModuleFromModuleSpecifier(file ast.HasFileName, moduleSpecifier *ast.StringLiteralLike) *module.ResolvedModule {
 	panic("unimplemented")
 }
@@ -69,7 +74,15 @@ func (p *fakeProgram) GetNearestAncestorDirectoryWithPackageJson(dirname string)
 	return ""
 }
 
-func (p *fakeProgram) GetPackageJsonInfo(pkgJsonPath string) modulespecifiers.PackageJsonInfo {
+func (p *fakeProgram) GetSymlinkCache() *symlinks.KnownSymlinks {
+	return nil
+}
+
+func (p *fakeProgram) ResolveModuleName(moduleName string, containingFile string, resolutionMode core.ResolutionMode) *module.ResolvedModule {
+	return nil
+}
+
+func (p *fakeProgram) GetPackageJsonInfo(pkgJsonPath string) *packagejson.InfoCacheEntry {
 	return nil
 }
 
@@ -87,6 +100,10 @@ func (p *fakeProgram) GetProjectReferenceFromSource(path tspath.Path) *tsoptions
 
 func (p *fakeProgram) IsSourceFromProjectReference(path tspath.Path) bool {
 	return false
+}
+
+func (p *fakeProgram) GetPackagesMap() map[string]bool {
+	return nil
 }
 
 func (p *fakeProgram) GetProjectReferenceFromOutputDts(path tspath.Path) *tsoptions.SourceOutputAndProjectReference {
@@ -244,10 +261,9 @@ func TestImportElision(t *testing.T) {
 					}
 					return nil
 				},
-			})
+			}, nil)
 
 			emitResolver := c.GetEmitResolver()
-			emitResolver.MarkLinkedReferencesRecursively(file)
 
 			opts := &transformers.TransformOptions{CompilerOptions: compilerOptions, Context: printer.NewEmitContext(), EmitResolver: emitResolver, Resolver: emitResolver}
 			file = tstransforms.NewTypeEraserTransformer(opts).TransformSourceFile(file)

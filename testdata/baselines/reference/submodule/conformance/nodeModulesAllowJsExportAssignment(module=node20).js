@@ -54,9 +54,9 @@ declare const a: {};
 export = a;
 //// [file.d.ts]
 export = a;
+declare const a: {};
 //// [index.d.ts]
 declare const a: {};
 export = a;
 //// [file.d.ts]
 import "fs";
-export = a;

@@ -12,7 +12,7 @@ const a = "hello
 }
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m17[0m - [91merror[0m[90m TS1002: [0mUnterminated string literal.
 
@@ -22,7 +22,7 @@ Output::
 
 Found 1 error in a.ts[90m:1[0m
 
-//// [/home/src/tslibs/TS/Lib/lib.d.ts] *Lib*
+//// [/home/src/tslibs/TS/Lib/lib.es2025.full.d.ts] *Lib*
 /// <reference no-default-lib="true"/>
 interface Boolean {}
 interface Function {}
@@ -51,7 +51,7 @@ declare const console: { log(msg: any): void; };
 Edit [0]:: no change
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m17[0m - [91merror[0m[90m TS1002: [0mUnterminated string literal.
 
@@ -88,6 +88,7 @@ tsgo
 ExitStatus:: Success
 Output::
 //// [/home/src/projects/project/a.js] *new* 
+"use strict";
 const a = "hello";
 
 
@@ -106,7 +107,7 @@ Edit [5]:: Introduce error
 const a = "hello
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m17[0m - [91merror[0m[90m TS1002: [0mUnterminated string literal.
 
@@ -133,6 +134,7 @@ Output::
 Found 1 error in a.ts[90m:1[0m
 
 //// [/home/src/projects/project/a.js] *modified* 
+"use strict";
 const a = "hello;
 
 
@@ -141,7 +143,7 @@ const a = "hello;
 Edit [7]:: no change
 
 tsgo --noEmit
-ExitStatus:: DiagnosticsPresent_OutputsSkipped
+ExitStatus:: DiagnosticsPresent_OutputsGenerated
 Output::
 [96ma.ts[0m:[93m1[0m:[93m17[0m - [91merror[0m[90m TS1002: [0mUnterminated string literal.
 
